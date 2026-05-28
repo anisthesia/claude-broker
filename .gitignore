@@ -1,0 +1,7 @@
+node_modules/
+broker.db
+broker.db-shm
+broker.db-wal
+logs/
+.env
+*.log

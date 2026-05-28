@@ -1,0 +1,327 @@
+# Protocol intelligence v2 — heartbeat channel + envelope validator
+
+Two complementary additions to the claude-broker protocol. Together they shift
+the orchestrator from "reconstruct system state from message archaeology" to
+"read it directly," and stop workers from silently violating the envelope
+contract.
+
+Status: spec, not yet implemented. Drafted 2026-05-27 from the dogsvilla pilot
+cost analysis.
+
+Motivating data: the dogsvilla pilot (4 sessions, 34h, 4815 turns) cost
+~$3,472 at API-equivalent pricing. ~$1,200 of that was the 1M-context-tier
+surcharge from sessions running past 200k context. The pilot also surfaced
+silent envelope drift (missing `consent_basis`, mistyped `task_id`,
+wrong-cased `to:` values) that the broker had no way to catch.
+
+---
+
+## Spec 1 — Heartbeat envelope + `dv-telemetry` channel
+
+### Channel
+
+`dv-telemetry` — new channel, purpose-built for machine consumption.
+Separate from `dv-status` because:
+
+- `dv-status` is the durable audit log of human-meaningful events.
+  Heartbeats would flood it.
+- `dv-telemetry` gets purged at sprint start; stale heartbeats are noise.
+- Different cadence, different retention, different consumer.
+
+Workers write; only the orchestrator reads.
+
+### Envelope shape
+
+JSON-as-string in `content`, new `type: "heartbeat"`.
+
+```json
+{
+  "type": "heartbeat",
+  "from": "backend" | "frontend" | "customer-portal" | "orchestrator",
+  "ts": "2026-05-27T18:00:00Z",
+  "session_id": "<jsonl filename stem>",
+  "model": "claude-opus-4-7" | "claude-sonnet-4-6",
+  "context": {
+    "size_tokens": 147823,
+    "cache_read": 145200,
+    "cache_create": 2623,
+    "tier_threshold_pct": 73.9,
+    "rotation_recommended": true
+  },
+  "activity": {
+    "last_tool_call_ts": "2026-05-27T17:59:42Z",
+    "current_task_id": "fix-2026-05-27-loyalty-03",
+    "state": "working" | "idle-polling" | "blocked-on-question" | "rotating"
+  },
+  "cost_since_start": {
+    "input_tokens": 18432,
+    "output_tokens": 281443,
+    "cache_read_tokens": 89401234,
+    "cache_create_tokens": 1284322,
+    "estimated_usd": 217.43
+  }
+}
+```
+
+### Cadence
+
+| state | interval |
+|---|---|
+| `working` | every 90s |
+| `idle-polling` | every 5 min |
+| state transitions | immediate |
+| session start | cold-start ping with zero costs |
+| session end | final ping with `state: "rotating"` |
+
+Cost envelope: ~150 output tokens × 4 workers × 40/hr peak ≈ 24k tok/hr ≈
+$1.80/hr at standard tier. Acceptable for the observability gained.
+
+### Field semantics worth pinning
+
+- **`context.tier_threshold_pct`**: `size_tokens / 200_000 * 100`. Crossing
+  75% sets `rotation_recommended: true` — the contract orchestrator depends on.
+- **`activity.state`**: smallest enum that captures decision-affecting state.
+  `working` vs `idle-polling` distinguishes "in-flight work" from "waiting on
+  broker"; `blocked-on-question` is the deadlock signal.
+- **`cost_since_start.estimated_usd`**: computed by the worker from its own
+  usage telemetry plus a hardcoded pricing table. Not authoritative —
+  orientation, not billing.
+
+### Orchestrator consumption
+
+At turn-start, read `dv-telemetry` with `since_id`. Build in-context map
+`worker → latest_heartbeat`. Triggers:
+
+1. **Rotation reminder.** Any worker with `rotation_recommended: true` AND
+   `state: working` → dispatch `type: note` to its inbox:
+   *"rotate when current sub-task closes — context at \<N\>k"*.
+2. **Deadlock escalation.** Any worker `state: blocked-on-question` for
+   > 5min with no question reply landing → escalate via `AskUserQuestion`.
+3. **Budget alert.** Sum of `cost_since_start.estimated_usd` across workers
+   crosses configured sprint budget → `type: note` to `dv-control`.
+4. **Liveness.** No heartbeat from a known-running worker for > 2× expected
+   interval → assume crashed; surface to user.
+
+### Purge policy
+
+Orchestrator calls `purge_channel("dv-telemetry")` at sprint start. Workers
+don't read this channel — only orchestrator does — so purge is safe.
+
+### Worker implementation surface
+
+Each worker's CLAUDE.md gets a "Heartbeat protocol" section alongside
+Turn-start ritual and Idle state:
+
+> After every tool call that returned a `usage` payload, update in-memory
+> cost accumulators. Before the absolute-last tool of each turn
+> (`wait_for_messages` for idle, or text response), if it's been ≥90s
+> since last heartbeat OR state has changed OR `tier_threshold_pct` just
+> crossed 75%, send a heartbeat to `dv-telemetry`.
+
+No broker changes required for the heartbeat itself — pure convention layer.
+
+---
+
+## Spec 2 — Broker-side envelope validator
+
+### Goal
+
+Reject malformed messages at send-time with a clear error pointing at the
+missing field. Today the broker is opaque to content; drift accumulates
+silently.
+
+### Design principles
+
+- **Opt-in per channel.** General-purpose channels (e.g. ad-hoc `demo`)
+  stay free-form. Schemas registered explicitly.
+- **Warn-only first, strict later.** Ship in warn-only mode for a week so
+  in-flight sessions (using old conventions) don't break mid-sprint. Flip
+  to strict after clean logs.
+- **Schemas live in SQLite.** Not in a config file — same persistence
+  story as messages, hot-reload without server restart.
+
+### Schema storage
+
+```sql
+CREATE TABLE IF NOT EXISTS channel_schemas (
+  channel    TEXT PRIMARY KEY,
+  schema     TEXT NOT NULL,            -- JSON Schema draft-07
+  strict     INTEGER NOT NULL DEFAULT 0, -- 0 = warn-only, 1 = reject
+  updated_at INTEGER NOT NULL
+);
+```
+
+### New MCP tools
+
+```
+register_channel_schema(channel, schema_json, strict?)   -- idempotent upsert
+get_channel_schema(channel)                              -- returns current schema or null
+clear_channel_schema(channel)                            -- revert to free-form
+list_channel_schemas()                                   -- which channels are schema'd
+```
+
+### Validation hook (inside existing `send_message`)
+
+Pseudocode insertion right after destructuring `{channel, sender, content}`:
+
+```js
+const schemaRow = stmtGetSchema.get(channel);
+if (schemaRow) {
+  let parsed;
+  try { parsed = JSON.parse(content); }
+  catch (e) {
+    if (schemaRow.strict) return errResp(`channel '${channel}' requires JSON: ${e.message}`);
+  }
+  if (parsed) {
+    const valid = ajv.validate(JSON.parse(schemaRow.schema), parsed);
+    if (!valid) {
+      const msg = ajv.errors.map(e => `${e.instancePath || '/'} ${e.message}`).join('; ');
+      if (schemaRow.strict) {
+        return errResp(
+          `schema validation failed on '${channel}': ${msg}. ` +
+          `Call get_channel_schema('${channel}') to see required fields.`
+        );
+      } else {
+        console.warn(`[validator] ${channel} warn: ${msg}`);
+      }
+    }
+  }
+}
+// existing stmtInsert.run(...) continues unchanged
+```
+
+Add `ajv` to package.json. Net ~80 LOC in server.js + a small handful of new
+tool registrations.
+
+### Initial schemas to register
+
+**Worker inboxes** (`dv-backend`, `dv-frontend`, `dv-customer-portal`):
+
+```json
+{
+  "type": "object",
+  "required": ["type", "task_id", "from", "to", "subject"],
+  "properties": {
+    "type": {"enum": ["task", "question", "note", "approval-token", "approval-revoke"]},
+    "task_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$"},
+    "from": {"const": "orchestrator"},
+    "to": {"enum": ["backend", "frontend", "customer-portal", "*"]},
+    "subject": {"type": "string", "minLength": 3},
+    "depends_on": {"type": "array", "items": {"type": "string"}},
+    "required_checks": {"type": "array", "items": {"type": "string"}},
+    "wire_compat": {"enum": ["additive", "breaking"]},
+    "body": {},
+    "refs": {"type": "array"}
+  },
+  "additionalProperties": false
+}
+```
+
+**`dv-status`** — worker → orchestrator. Conditional rule: `type: result` for
+a prod-touching task MUST carry `body.consent_basis`:
+
+```json
+{
+  "type": "object",
+  "required": ["type", "task_id", "from", "to", "subject"],
+  "properties": {
+    "type": {"enum": ["status", "result", "question", "note"]},
+    "from": {"enum": ["backend", "frontend", "customer-portal"]},
+    "to": {"enum": ["orchestrator", "backend", "frontend", "customer-portal"]}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {"const": "result"},
+          "body": {"properties": {"production_touching": {"const": true}}}
+        }
+      },
+      "then": { "properties": { "body": { "required": ["consent_basis"] } } }
+    }
+  ]
+}
+```
+
+**`dv-control`** — broadcasts. `contract-change` requires `before`/`after`/
+`affected_workers`. `approval-token` requires `authorized_actions`/`env`/
+`scope_workers`/`expires_at`.
+
+**`dv-telemetry`** — the heartbeat schema from Spec 1.
+
+### Error shape returned to worker
+
+Standard MCP error response, but the human-readable text is what matters
+because that's what the model sees:
+
+```
+schema validation failed on 'dv-status': /body 'consent_basis' is required (production_touching: true).
+Call get_channel_schema('dv-status') to see required fields.
+```
+
+Self-correcting: model reads the error, sees what's missing, retries with
+the fix.
+
+### Migration / rollout
+
+1. Land the validator code in warn-only mode for ALL existing schemas.
+2. Watch `console.warn` logs for a week of active sprints.
+3. Patch any false-positives or schema bugs.
+4. Flip `dv-control` and worker inboxes to `strict: 1`. Leave `dv-status`
+   warn-only longer (most diverse, highest-risk to make strict).
+5. After two clean sprints in strict mode, declare done.
+
+### Failure mode for orchestrator
+
+Repeated validation failures from the same worker → that worker's CLAUDE.md
+is out of sync with the schema. Orchestrator should `AskUserQuestion` whether
+to restart it.
+
+### Effort estimate
+
+- server.js: ~80 LOC for 4 new tools + validation hook
+- 1 dependency: `ajv` (~100KB)
+- 4 initial schemas: ~150 lines JSON total
+- README update: 1 new section
+
+Half-day for the server work + an afternoon for the schema authoring + week
+of warn-only burn-in before flipping strict.
+
+---
+
+## What this pair gives you, together
+
+- **Orchestrator stops reconstructing system state from message archaeology**
+  and starts reading it directly from `dv-telemetry`.
+- **Workers can't silently violate the envelope contract** — broker says
+  "no" with a fixable error.
+- **The 150k rotation rule becomes data-driven, not vibes-driven** —
+  heartbeats include the threshold percentage and the orchestrator
+  dispatches reminders mechanically.
+- **Cost telemetry becomes a first-class observable** instead of an
+  after-the-fact 4800-row JSONL crunch.
+
+## Open questions
+
+- **Schema versioning.** When a schema changes mid-sprint, old in-flight
+  messages may not validate. Either (a) make schemas append-only with a
+  `valid_from_id` column, or (b) accept that schema updates require a
+  sprint boundary. Current spec leans (b) for simplicity.
+- **Heartbeat compaction.** At 90s cadence × 4 workers × multi-hour sprint,
+  `dv-telemetry` will accumulate hundreds of messages. Purge-at-sprint-start
+  handles freshness but the orchestrator's `read_messages` will return a
+  large set. Consider a `get_latest_heartbeats()` MCP tool that returns
+  one-per-sender efficiently.
+- **Hook-based enforcement as alternative.** Both items here could
+  alternatively be implemented as Claude Code hooks on the worker side,
+  no broker changes. Broker-centric design chosen because (a) it's the
+  single source of truth across heterogeneous sessions, (b) hooks would
+  duplicate the schema knowledge in every worker.
+
+## Sequencing recommendation
+
+Ship the validator first (Spec 2). It's lower-risk, doesn't depend on
+worker behavior changes, and immediately catches the existing envelope
+drift in dogsvilla. The heartbeat protocol (Spec 1) builds on a validated
+envelope baseline — easier to land when malformed heartbeats can't poison
+the telemetry channel.

@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dogsvilla worker-inbox envelope (dv-backend / dv-frontend / dv-customer-portal)",
+  "description": "Messages dispatched by the orchestrator into a worker inbox.",
+  "type": "object",
+  "required": ["type", "task_id", "from", "to", "subject"],
+  "properties": {
+    "type": {
+      "enum": ["task", "question", "note", "approval-token", "approval-revoke", "contract-change"]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$",
+      "description": "Format: <slug>-YYYY-MM-DD-<short-name>"
+    },
+    "from": { "const": "orchestrator" },
+    "to": { "enum": ["backend", "frontend", "customer-portal", "*"] },
+    "subject": { "type": "string", "minLength": 3 },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+:(backend|frontend|customer-portal)$"
+      },
+      "description": "<task_id>:<worker> references that must complete before this task starts."
+    },
+    "required_checks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Exact commands the worker must run before reporting type:result, e.g. ['lint', 'build', 'test']."
+    },
+    "wire_compat": {
+      "enum": ["additive", "breaking"],
+      "description": "Required on type:contract-change."
+    },
+    "body": {},
+    "refs": { "type": "array" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "contract-change" } }, "required": ["type"] },
+      "then": { "required": ["wire_compat"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "approval-token" } }, "required": ["type"] },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": ["authorized_actions", "env", "scope_workers", "expires_at"],
+            "properties": {
+              "authorized_actions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+              "env": { "type": "string" },
+              "scope_workers": { "type": "array", "minItems": 1 },
+              "expires_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}
