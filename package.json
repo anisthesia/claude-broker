@@ -1,6 +1,6 @@
 {
   "name": "claude-broker",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Tiny MCP HTTP server that lets multiple Claude Code sessions exchange messages over a shared channel.",
   "type": "module",
   "scripts": {
