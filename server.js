@@ -730,6 +730,19 @@ app.post("/inbox/batch", (req, res) => {
   res.json(result);
 });
 
+// REST send endpoint — lets non-MCP clients (watchdog.sh, scripts) post messages.
+// POST /messages  body: { channel, sender, content }
+// No auth required (same trust level as /inbox read endpoints).
+app.post("/messages", (req, res) => {
+  const { channel, sender, content } = req.body || {};
+  if (!channel || !sender || content === undefined)
+    return res.status(400).json({ error: "channel, sender, content required" });
+  const contentStr = typeof content === "string" ? content : JSON.stringify(content);
+  const row = stmtInsert.run(channel, sender, contentStr, Date.now());
+  emitter.emit(channel, { id: row.lastInsertRowid, channel, sender, content: contentStr });
+  res.json({ id: row.lastInsertRowid, channel, sender });
+});
+
 // ── Worker control endpoints ───────────────────────────────────────────────────
 
 app.get("/workers", (_req, res) => {
@@ -798,6 +811,36 @@ app.post("/workers/:name/stop", (req, res) => {
   }
 });
 
+// GET /cost?since=<ISO-date> — aggregate session costs from dv-telemetry.
+// Returns { total_usd, sessions, by_worker: [{worker, sessions, total_usd}] }
+app.get("/cost", (req, res) => {
+  const since = req.query.since
+    ? new Date(req.query.since).getTime()
+    : Date.now() - 24 * 60 * 60 * 1000; // default: last 24h
+
+  const rows = db.prepare(
+    `SELECT sender, content, created_at FROM messages
+     WHERE channel = 'dv-telemetry' AND created_at >= ?
+     ORDER BY id ASC`
+  ).all(since);
+
+  const byWorker = {};
+  for (const row of rows) {
+    let hb = {};
+    try { hb = JSON.parse(row.content); } catch { continue; }
+    const usd = parseFloat(hb.cost_since_start?.estimated_usd ?? 0);
+    if (!usd || isNaN(usd)) continue;
+    const w = row.sender;
+    if (!byWorker[w]) byWorker[w] = { worker: w, sessions: 0, total_usd: 0 };
+    byWorker[w].sessions++;
+    byWorker[w].total_usd = Math.round((byWorker[w].total_usd + usd) * 10000) / 10000;
+  }
+
+  const workers = Object.values(byWorker).sort((a, b) => b.total_usd - a.total_usd);
+  const total_usd = Math.round(workers.reduce((s, w) => s + w.total_usd, 0) * 10000) / 10000;
+  res.json({ total_usd, sessions: workers.reduce((s, w) => s + w.sessions, 0), since: new Date(since).toISOString(), by_worker: workers });
+});
+
 // Dashboard helpers
 function nsOf(channel) {
   const idx = channel.indexOf("-");
@@ -859,6 +902,21 @@ app.get("/dashboard", (req, res) => {
   const sprintInfos = isAll
     ? namespaces.map(getSprintInfo).filter(Boolean)
     : [getSprintInfo(selectedNs)].filter(Boolean);
+
+  // ── Today's cost summary from telemetry (session-end heartbeats) ─────────────
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const costRows = db.prepare(
+    `SELECT sender, content FROM messages WHERE channel LIKE '%-telemetry' AND created_at >= ? ORDER BY id ASC`
+  ).all(todayStart.getTime());
+  const costByWorker = {};
+  for (const r of costRows) {
+    let hb = {}; try { hb = JSON.parse(r.content); } catch { continue; }
+    const usd = parseFloat(hb.cost_since_start?.estimated_usd ?? 0);
+    if (!usd || isNaN(usd)) continue;
+    if (!costByWorker[r.sender]) costByWorker[r.sender] = 0;
+    costByWorker[r.sender] = Math.round((costByWorker[r.sender] + usd) * 10000) / 10000;
+  }
+  const totalCostToday = Math.round(Object.values(costByWorker).reduce((s, v) => s + v, 0) * 10000) / 10000;
 
   // ── Worker liveness from telemetry ──────────────────────────────────────────
   // For selected ns, read <ns>-telemetry (or all *-telemetry channels if "all")
@@ -1167,6 +1225,13 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
   .btn-stop{background:#2b0d0d;color:#f85149;border-color:#5c1f1f}
   .btn-stop:hover{background:#3d1616}
   .btn-start:disabled,.btn-stop:disabled{opacity:.4;cursor:default}
+  .cost-bar{display:flex;align-items:center;gap:10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:8px 14px;margin-bottom:12px;font-size:12px;flex-wrap:wrap}
+  .cost-bar-label{color:#8b949e;text-transform:uppercase;letter-spacing:.06em;font-size:11px}
+  .cost-bar-total{color:#58a6ff;font-weight:bold;font-size:14px;min-width:60px}
+  .cost-bar-worker{color:#e6edf3;background:#161b22;border-radius:4px;padding:2px 7px}
+  .cost-bar-wname{color:#8b949e;margin-right:4px}
+  .cost-bar-link{margin-left:auto;color:#8b949e;font-size:11px;text-decoration:none}
+  .cost-bar-link:hover{color:#58a6ff}
   .questions-alert{background:#2b1d00;border:1px solid #6e4c00;border-radius:6px;padding:10px 16px;margin-bottom:16px}
   .questions-alert-title{color:#e3b341;font-weight:bold;margin-bottom:6px;font-size:12px}
   .questions-alert-item{padding:3px 0;border-bottom:1px solid #3b2800;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1228,6 +1293,12 @@ ${tabs}
 </div>
 
 ${questionsAlertHtml}
+${totalCostToday > 0 ? `<div class="cost-bar">
+  <span class="cost-bar-label">Today's spend</span>
+  <span class="cost-bar-total">$${totalCostToday.toFixed(4)}</span>
+  ${Object.entries(costByWorker).sort((a,b)=>b[1]-a[1]).map(([w,c])=>`<span class="cost-bar-worker"><span class="cost-bar-wname">${escHtml(w)}</span> $${c.toFixed(4)}</span>`).join("")}
+  <a href="/cost" class="cost-bar-link" target="_blank">JSON</a>
+</div>` : ""}
 <h2>Worker Liveness ${nsLabel}</h2>
 ${workers.length === 0
   ? `<div class="empty">No telemetry yet${isAll ? "" : ` for "${selectedNs}"`}. Workers emit heartbeats to <code>${isAll ? "*-telemetry" : telemetryChan}</code>.</div>`
