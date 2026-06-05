@@ -210,6 +210,17 @@ function fetchFiltered(channel, sinceId, lim, filterSender, filterType) {
   return stmtSelect.all(channel, sinceId, lim);
 }
 
+function fetchFeedRows(channels, signalOnly, limit) {
+  if (channels.length === 0) return [];
+  const typeClause = signalOnly
+    ? `AND json_extract(content, '$.type') IN ('result', 'question', 'error')`
+    : '';
+  const ph = channels.map(() => '?').join(',');
+  return db.prepare(
+    `SELECT id, channel, sender, content, created_at FROM messages WHERE channel IN (${ph}) ${typeClause} ORDER BY id DESC LIMIT ?`
+  ).all(...channels, limit);
+}
+
 // ── Background auto-pruning ───────────────────────────────────────────────────
 
 function runAutoPrune() {
@@ -739,11 +750,11 @@ app.post("/workers/:name/start", (req, res) => {
   if (watchdogProcs.has(name)) return res.status(409).json({ error: `Worker "${name}" already running (pid ${watchdogProcs.get(name).pid})` });
   if (!WATCHDOG_BIN)           return res.status(503).json({ error: "WATCHDOG_BIN not configured" });
 
-  let outStream, errStream;
+  let outFd, errFd;
   try {
     mkdirSync(WORKERS_LOG_DIR, { recursive: true });
-    outStream = createWriteStream(`${WORKERS_LOG_DIR}/${name}.out.log`, { flags: "a" });
-    errStream = createWriteStream(`${WORKERS_LOG_DIR}/${name}.err.log`, { flags: "a" });
+    outFd = openSync(`${WORKERS_LOG_DIR}/${name}.out.log`, "a");
+    errFd = openSync(`${WORKERS_LOG_DIR}/${name}.err.log`, "a");
   } catch (e) {
     return res.status(500).json({ error: `Failed to open log files: ${e.message}` });
   }
@@ -751,10 +762,12 @@ app.post("/workers/:name/start", (req, res) => {
   let proc;
   try {
     proc = spawn(WATCHDOG_BIN, def.args || [], {
-      stdio:    ["ignore", outStream, errStream],
-      detached: true,  // own process group — lets us kill -pid to kill the full tree
+      stdio:    ["ignore", outFd, errFd],
+      detached: true,
     });
-    proc.unref(); // broker exit won't kill the watchdog
+    proc.unref();
+    closeSync(outFd);
+    closeSync(errFd);
   } catch (e) {
     return res.status(500).json({ error: `spawn failed: ${e.message}` });
   }
@@ -932,6 +945,66 @@ app.get("/dashboard", (req, res) => {
     workers.sort((a,b) => a.sender.localeCompare(b.sender));
   }
 
+  // ── Activity feed ─────────────────────────────────────────────────────────────
+  const feedSignalOnly = req.query.feed !== "all";
+  const statusChannels = isAll
+    ? allChannels.filter(r => r.channel.endsWith("-status")).map(r => r.channel)
+    : allChannels.some(r => r.channel === `${selectedNs}-status`) ? [`${selectedNs}-status`] : [];
+  const feedRows = fetchFeedRows(statusChannels, feedSignalOnly, 50);
+  const questionRows = feedRows.filter(r => {
+    try { return JSON.parse(r.content).type === "question"; } catch { return false; }
+  });
+
+  const feedHref = (showAll) => {
+    const p = [];
+    if (selectedNs !== "all") p.push(`ns=${selectedNs}`);
+    if (live) p.push("live=1");
+    if (showAll) p.push("feed=all");
+    return `/dashboard${p.length ? "?" + p.join("&") : ""}`;
+  };
+
+  const renderFeedRow = (r) => {
+    let parsed = {};
+    try { parsed = JSON.parse(r.content); } catch {}
+    const type    = parsed.type || "?";
+    const rawText = parsed.summary || parsed.subject || parsed.body || parsed.text || r.content;
+    const summary = String(rawText).slice(0, 120);
+    const taskTag = parsed.task_id
+      ? `<span class="feed-taskid">${escHtml(String(parsed.task_id).slice(-12))}</span>` : "";
+    const chanTag = isAll ? `<span class="feed-chan">${escHtml(r.channel)}</span>` : "";
+    let badgeClass;
+    if      (type === "result")   badgeClass = "feed-result";
+    else if (type === "question") badgeClass = "feed-question";
+    else if (type === "error")    badgeClass = "feed-error";
+    else if (type === "task")     badgeClass = "feed-task";
+    else                          badgeClass = "feed-other";
+    return `<tr class="${type === "question" ? "feed-row-q" : ""}">
+      <td class="feed-time">${agoStr(r.created_at)}</td>
+      <td><span class="feed-badge ${badgeClass}">${escHtml(type)}</span></td>
+      <td class="feed-sender">${escHtml(r.sender)}${chanTag}</td>
+      <td class="feed-content">${escHtml(summary)}${summary.length >= 120 ? "…" : ""}${taskTag}</td>
+    </tr>`;
+  };
+
+  const questionsAlertHtml = questionRows.length > 0 ? (() => {
+    const items = questionRows.slice(0, 5).map(r => {
+      let p = {};
+      try { p = JSON.parse(r.content); } catch {}
+      const from = escHtml(p.from || r.sender);
+      const body = escHtml(String(p.body || p.subject || r.content).slice(0, 200));
+      const tid  = p.task_id ? ` <span class="feed-taskid">[${escHtml(p.task_id)}]</span>` : "";
+      return `<div class="questions-alert-item"><strong>${from}</strong>: ${body}${tid}</div>`;
+    }).join("");
+    return `<div class="questions-alert">
+  <div class="questions-alert-title">⚠ ${questionRows.length} pending question${questionRows.length > 1 ? "s" : ""} — need your attention</div>
+  ${items}
+</div>`;
+  })() : "";
+
+  const feedTableHtml = feedRows.length === 0
+    ? `<div class="empty">No ${feedSignalOnly ? "signal " : ""}messages yet${statusChannels.length > 0 ? ` on ${escHtml(statusChannels.join(", "))}` : " (no *-status channels found)"}.</div>`
+    : `<table><thead><tr><th>Time</th><th>Type</th><th>Worker${isAll ? " / Channel" : ""}</th><th>Summary</th></tr></thead><tbody>${feedRows.map(renderFeedRow).join("\n")}</tbody></table>`;
+
   // Annotate each worker with managed/running flags for Start/Stop buttons
   workers.forEach(w => {
     w.isManaged = WATCHDOG_BIN.length > 0 &&
@@ -1094,6 +1167,27 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
   .btn-stop{background:#2b0d0d;color:#f85149;border-color:#5c1f1f}
   .btn-stop:hover{background:#3d1616}
   .btn-start:disabled,.btn-stop:disabled{opacity:.4;cursor:default}
+  .questions-alert{background:#2b1d00;border:1px solid #6e4c00;border-radius:6px;padding:10px 16px;margin-bottom:16px}
+  .questions-alert-title{color:#e3b341;font-weight:bold;margin-bottom:6px;font-size:12px}
+  .questions-alert-item{padding:3px 0;border-bottom:1px solid #3b2800;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .questions-alert-item:last-child{border-bottom:none}
+  .section-hdr{display:flex;align-items:center;color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #21262d;padding-bottom:6px;margin:20px 0 10px}
+  .section-hdr-controls{margin-left:auto;text-transform:none;letter-spacing:normal;display:flex;gap:4px}
+  .feed-toggle{padding:1px 8px;border-radius:3px;font-size:10px;text-decoration:none;color:#8b949e;border:1px solid #21262d}
+  .feed-toggle-active{color:#c9d1d9;background:#21262d;border-color:#30363d}
+  .feed-badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:.04em}
+  .feed-result{background:#0d2b0d;color:#3fb950}
+  .feed-question{background:#3b2800;color:#e3b341}
+  .feed-error{background:#2b0d0d;color:#f85149}
+  .feed-task{background:#0d1b3e;color:#79c0ff}
+  .feed-other{background:#21262d;color:#8b949e}
+  .feed-time{color:#8b949e;font-size:11px;white-space:nowrap;width:80px}
+  .feed-sender{color:#79c0ff;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+  .feed-content{max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .feed-chan{font-size:10px;color:#484f58;margin-left:6px}
+  .feed-taskid{font-size:10px;color:#484f58;margin-left:8px}
+  .feed-row-q td{background:#1a1400}
+  .feed-row-q:hover td{background:#241c00 !important}
 </style>
 </head>
 <body>
@@ -1133,10 +1227,20 @@ ${tabs}
 <a href="${tabHref(selectedNs, !live)}" class="live-btn ${live ? "live-on" : "live-off"}">${live ? "● Live" : "Live"}</a>
 </div>
 
+${questionsAlertHtml}
 <h2>Worker Liveness ${nsLabel}</h2>
 ${workers.length === 0
   ? `<div class="empty">No telemetry yet${isAll ? "" : ` for "${selectedNs}"`}. Workers emit heartbeats to <code>${isAll ? "*-telemetry" : telemetryChan}</code>.</div>`
   : `<table><thead><tr><th>Worker</th><th>State</th><th>Current Task</th><th>Cost</th><th>Inbox</th><th>Last Seen</th>${hasActions ? "<th>Actions</th>" : ""}</tr></thead><tbody>${workerRows}</tbody></table>`}
+
+<div class="section-hdr">
+  Activity Feed ${nsLabel}
+  <span class="section-hdr-controls">
+    <a href="${feedHref(false)}" class="feed-toggle${feedSignalOnly ? " feed-toggle-active" : ""}">Signal</a>
+    <a href="${feedHref(true)}" class="feed-toggle${!feedSignalOnly ? " feed-toggle-active" : ""}">All</a>
+  </span>
+</div>
+${feedTableHtml}
 
 <h2>Channels ${nsLabel}</h2>
 ${channels.length === 0
