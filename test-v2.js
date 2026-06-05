@@ -49,7 +49,7 @@ async function run() {
   console.log("1. Tool list");
   const tools = await a.listTools();
   const names = tools.tools.map(t => t.name);
-  for (const expected of ["delete_message", "post_gated_message", "register_capability", "list_capabilities", "deregister_capability", "check_result"]) {
+  for (const expected of ["delete_message", "post_gated_message", "register_capability", "list_capabilities", "deregister_capability", "check_result", "has_messages", "read_last", "list_workers", "start_worker", "stop_worker"]) {
     assert(names.includes(expected), `tool '${expected}' registered`, `missing — got: ${names.join(", ")}`);
   }
   assert(names.includes("purge_channel"), "tool 'purge_channel' registered");
@@ -249,8 +249,135 @@ async function run() {
   const toolNames = tools.tools.map(t => t.name);
   assert(toolNames.includes("check_result"), "check_result registered in tool list");
 
+  // ── 13. has_messages ─────────────────────────────────────────────────────────
+  console.log("\n13. has_messages");
+  const hmch = `test-hm-${Date.now()}`;
+
+  // Empty channel → pending: false
+  const hm1 = JSON.parse(await call(a, "has_messages", { channel: hmch, since_id: 0 }));
+  assert(hm1.pending === false, "has_messages: empty channel → pending=false");
+  assert(hm1.max_id === 0, "has_messages: empty channel → max_id=0");
+  assert(hm1.channel === hmch, "has_messages: channel echoed back");
+
+  // After posting → pending: true
+  await call(a, "send_message", { channel: hmch, sender: "x", content: "hello" });
+  const hm2 = JSON.parse(await call(a, "has_messages", { channel: hmch, since_id: 0 }));
+  assert(hm2.pending === true, "has_messages: after post → pending=true");
+  assert(hm2.max_id > 0, "has_messages: after post → max_id > 0");
+
+  // Since current max_id → pending: false again
+  const hm3 = JSON.parse(await call(a, "has_messages", { channel: hmch, since_id: hm2.max_id }));
+  assert(hm3.pending === false, "has_messages: since current max_id → pending=false");
+
+  // Post another → pending: true again
+  await call(a, "send_message", { channel: hmch, sender: "x", content: "world" });
+  const hm4 = JSON.parse(await call(a, "has_messages", { channel: hmch, since_id: hm2.max_id }));
+  assert(hm4.pending === true, "has_messages: new message past cursor → pending=true");
+
+  // ── 14. read_last ─────────────────────────────────────────────────────────────
+  console.log("\n14. read_last");
+  const rlch = `test-rl-${Date.now()}`;
+
+  // Empty channel
+  const rl0 = await call(a, "read_last", { channel: rlch, n: 5 });
+  assert(rl0.includes("No messages"), "read_last: empty channel → 'No messages'");
+
+  // Post 5 messages
+  for (let i = 1; i <= 5; i++) {
+    await call(a, "send_message", { channel: rlch, sender: "seq", content: JSON.stringify({ seq: i }) });
+  }
+
+  // read_last(n=3) returns last 3 in chronological order
+  const rl3 = await call(a, "read_last", { channel: rlch, n: 3 });
+  const lines = rl3.trim().split("\n");
+  assert(lines.length === 3, `read_last n=3 returns 3 messages (got ${lines.length})`);
+  assert(rl3.includes('"seq":3') && rl3.includes('"seq":4') && rl3.includes('"seq":5'), "read_last n=3 returns the 3 newest in order");
+  assert(!rl3.includes('"seq":1') && !rl3.includes('"seq":2'), "read_last n=3 does not include older messages");
+
+  // read_last(n=10) returns all 5 when fewer exist
+  const rl10 = await call(a, "read_last", { channel: rlch, n: 10 });
+  const lines10 = rl10.trim().split("\n");
+  assert(lines10.length === 5, `read_last n=10 returns all 5 when fewer exist (got ${lines10.length})`);
+
+  // Messages are in chronological order (oldest-first)
+  const firstSeq = JSON.parse(lines10[0].replace(/^\[\d+\] \w+: /, ''));
+  const lastSeq  = JSON.parse(lines10[4].replace(/^\[\d+\] \w+: /, ''));
+  assert(firstSeq.seq < lastSeq.seq, "read_last returns chronological order (oldest-first)");
+
+  // ── 15. filter_sender multi-sender ───────────────────────────────────────────
+  console.log("\n15. filter_sender multi-sender");
+  const msch = `test-ms-${Date.now()}`;
+
+  await call(a, "send_message", { channel: msch, sender: "alice", content: JSON.stringify({ type: "status", v: 1 }) });
+  await call(a, "send_message", { channel: msch, sender: "bob",   content: JSON.stringify({ type: "result", v: 2 }) });
+  await call(a, "send_message", { channel: msch, sender: "carol", content: JSON.stringify({ type: "note",   v: 3 }) });
+  await call(a, "send_message", { channel: msch, sender: "dave",  content: JSON.stringify({ type: "task",   v: 4 }) });
+
+  // Single sender still works
+  const ms1 = await call(a, "read_messages", { channel: msch, since_id: 0, filter_sender: "alice" });
+  assert(ms1.includes("alice") && !ms1.includes("bob") && !ms1.includes("carol"), "filter_sender single sender still works");
+
+  // Comma-separated multi-sender
+  const ms2 = await call(a, "read_messages", { channel: msch, since_id: 0, filter_sender: "alice,bob" });
+  assert(ms2.includes("alice") && ms2.includes("bob") && !ms2.includes("carol") && !ms2.includes("dave"), "filter_sender=alice,bob returns exactly those two senders");
+
+  // Multi-sender with spaces around commas
+  const ms3 = await call(a, "read_messages", { channel: msch, since_id: 0, filter_sender: "bob, carol, dave" });
+  assert(ms3.includes("bob") && ms3.includes("carol") && ms3.includes("dave") && !ms3.includes("alice"), "filter_sender trims spaces around commas");
+
+  // Multi-sender + filter_type combined
+  const ms4 = await call(a, "read_messages", { channel: msch, since_id: 0, filter_sender: "alice,bob", filter_type: "result" });
+  assert(ms4.includes("bob") && !ms4.includes("alice") && !ms4.includes("carol"), "filter_sender multi + filter_type combined");
+
+  // ── 16. list_workers / start_worker / stop_worker ────────────────────────────
+  console.log("\n16. Worker lifecycle tools");
+
+  const wlist = await call(a, "list_workers", {});
+  assert(wlist.includes("backend"), "list_workers: includes configured worker 'backend'");
+  assert(wlist.includes("stopped") || wlist.includes("running"), "list_workers: shows running state");
+
+  // start_worker on an unknown name returns isError
+  const startBad = await a.callTool({ name: "start_worker", arguments: { name: "nonexistent-worker-xyz" } });
+  assert(startBad.isError === true || startBad.content[0].text.includes("not found"), "start_worker: unknown worker returns error");
+
+  // stop_worker on a not-running worker returns isError
+  const stopIdle = await a.callTool({ name: "stop_worker", arguments: { name: "backend" } });
+  assert(stopIdle.isError === true || stopIdle.content[0].text.includes("not running"), "stop_worker: not-running worker returns error");
+
+  // list_workers + start + stop round-trip (only if WATCHDOG_BIN is configured)
+  const wlistParsed = wlist.split("\n");
+  const backendLine = wlistParsed.find(l => l.startsWith("backend\t"));
+  const backendStopped = backendLine && backendLine.includes("stopped");
+  if (backendStopped) {
+    const startRes = await call(a, "start_worker", { name: "backend" });
+    if (startRes.includes("WATCHDOG_BIN not configured")) {
+      console.log("  - start_worker round-trip skipped (WATCHDOG_BIN not set)");
+    } else {
+      assert(startRes.includes("pid"), "start_worker: returns pid on success");
+      const wlist2 = await call(a, "list_workers", {});
+      assert(wlist2.includes("running"), "list_workers: backend shows running after start");
+      // Idempotent start returns current pid, not error
+      const startAgain = await call(a, "start_worker", { name: "backend" });
+      assert(startAgain.includes("already running"), "start_worker: idempotent — already running returns info not error");
+      // Stop it
+      const stopRes = await call(a, "stop_worker", { name: "backend" });
+      assert(stopRes.includes("Stopped"), "stop_worker: confirms stop");
+      await new Promise(r => setTimeout(r, 200));
+      const wlist3 = await call(a, "list_workers", {});
+      const line3 = wlist3.split("\n").find(l => l.startsWith("backend\t"));
+      assert(line3 && line3.includes("stopped"), "list_workers: backend shows stopped after stop");
+    }
+  } else {
+    console.log("  - start/stop round-trip skipped (backend already running in this environment)");
+  }
+
+  // Tool list includes all three
+  assert(toolNames.includes("list_workers"), "list_workers registered in tool list");
+  assert(toolNames.includes("start_worker"), "start_worker registered in tool list");
+  assert(toolNames.includes("stop_worker"),  "stop_worker registered in tool list");
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
-  for (const c of [ch, wch, dch, pch, gch, wsch, toch, crch, crch2]) {
+  for (const c of [ch, wch, dch, pch, gch, wsch, toch, crch, crch2, hmch, rlch, msch]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   await ta.close();

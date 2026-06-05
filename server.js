@@ -8,7 +8,7 @@ import { z } from "zod";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { spawn } from "child_process";
-import { readFileSync, mkdirSync, createWriteStream } from "fs";
+import { readFileSync, mkdirSync, createWriteStream, openSync, closeSync } from "fs";
 
 const PORT               = Number(process.env.PORT)                   || 8080;
 const SHARED_SECRET      = process.env.SHARED_SECRET                  || "";
@@ -80,6 +80,19 @@ const stmtSelectFilter = db.prepare(`
   AND (? IS NULL OR json_extract(content, '$.type') = ?)
   ORDER BY id ASC LIMIT ?
 `);
+const stmtSelectFilterMulti = new Map(); // keyed by "nSenders_hasType"
+
+function getMultiSenderStmt(nSenders, hasType) {
+  const key = `${nSenders}_${hasType ? 1 : 0}`;
+  if (!stmtSelectFilterMulti.has(key)) {
+    const ph = Array(nSenders).fill("?").join(",");
+    let sql = `SELECT id, sender, content, created_at FROM messages WHERE channel = ? AND id > ? AND sender IN (${ph})`;
+    if (hasType) sql += ` AND json_extract(content, '$.type') = ?`;
+    sql += ` ORDER BY id ASC LIMIT ?`;
+    stmtSelectFilterMulti.set(key, db.prepare(sql));
+  }
+  return stmtSelectFilterMulti.get(key);
+}
 const stmtDeleteOne    = db.prepare("DELETE FROM messages WHERE id = ? AND channel = ?");
 const stmtChans        = db.prepare("SELECT channel, COUNT(*) AS n, MAX(id) AS last_id, MAX(created_at) AS last_ts FROM messages GROUP BY channel ORDER BY channel");
 const stmtPurge        = db.prepare("DELETE FROM messages WHERE channel = ?");
@@ -180,6 +193,12 @@ function formatRows(rows, channel, sinceId) {
 }
 
 function fetchFiltered(channel, sinceId, lim, filterSender, filterType) {
+  if (filterSender && filterSender.includes(",")) {
+    const senders = filterSender.split(",").map(s => s.trim()).filter(Boolean);
+    const stmt = getMultiSenderStmt(senders.length, !!filterType);
+    const params = [channel, sinceId, ...senders, ...(filterType ? [filterType] : []), lim];
+    return stmt.all(...params);
+  }
   if (filterSender || filterType) {
     return stmtSelectFilter.all(
       channel, sinceId,
@@ -387,6 +406,39 @@ function buildServer() {
     return { content: [{ type: "text", text: JSON.stringify({ found: row.n > 0, task_id, channel }) }] };
   });
 
+  // ── has_messages ────────────────────────────────────────────────────────────
+  server.registerTool("has_messages", {
+    title: "Check if a channel has messages (no content transfer)",
+    description: "Returns {pending, max_id, channel} — lightweight pre-check before read_messages. Use to gate dv-control reads: skip entirely if pending=false. Zero content transferred.",
+    inputSchema: {
+      channel:  z.string().min(1).describe("Channel to check."),
+      since_id: z.number().int().min(0).default(0).describe("Only count messages with id > since_id."),
+    },
+  }, async ({ channel, since_id }) => {
+    const row = db.prepare(
+      "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
+    ).get(channel, since_id ?? 0);
+    return { content: [{ type: "text", text: JSON.stringify({ pending: row.n > 0, max_id: row.max_id, channel }) }] };
+  });
+
+  // ── read_last ────────────────────────────────────────────────────────────────
+  server.registerTool("read_last", {
+    title: "Read the last N messages from a channel",
+    description: "Returns the N most recent messages in chronological order (oldest-first). Use for compaction recovery instead of read_messages(since_id=0) — transfers only the tail of history, not the full archive. Default n=20, max 100.",
+    inputSchema: {
+      channel: z.string().min(1).describe("Channel to read."),
+      n:       z.number().int().min(1).max(100).default(20).describe("Number of most-recent messages to return."),
+    },
+  }, async ({ channel, n }) => {
+    const rows = db.prepare(
+      "SELECT id, sender, content, created_at FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?"
+    ).all(channel, n ?? 20);
+    rows.reverse();
+    if (!rows.length) return { content: [{ type: "text", text: "No messages." }] };
+    const text = rows.map(r => `[${r.id}] ${r.sender}: ${r.content}`).join("\n");
+    return { content: [{ type: "text", text: text }] };
+  });
+
   // ── list_channels ───────────────────────────────────────────────────────────
   server.registerTool("list_channels", {
     title: "List channels",
@@ -531,12 +583,104 @@ function buildServer() {
     return { content: [{ type: "text", text }] };
   });
 
+  // ── list_workers ────────────────────────────────────────────────────────────
+  server.registerTool("list_workers", {
+    title: "List workers",
+    description: "List all workers defined in the worker config with their running state, PID, and uptime. Use this to check which watchdogs are active before starting or stopping one.",
+    inputSchema: {},
+  }, async () => {
+    if (!workerDefs.length) return { content: [{ type: "text", text: "(no workers configured — set WORKERS_CONFIG)" }] };
+    const lines = workerDefs.map(w => {
+      const entry = watchdogProcs.get(w.name);
+      const state = entry
+        ? `running  pid=${entry.pid}  uptime=${Math.floor((Date.now() - entry.startedAt) / 1000)}s`
+        : "stopped";
+      return `${w.name}\t${state}`;
+    });
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  // ── start_worker ─────────────────────────────────────────────────────────────
+  server.registerTool("start_worker", {
+    title: "Start a worker watchdog",
+    description: "Start the watchdog process for a named worker. The worker must be defined in the worker config (WORKERS_CONFIG). Returns the PID on success. No-ops (returns current PID) if already running.",
+    inputSchema: {
+      name: z.string().min(1).describe("Worker name as defined in WORKERS_CONFIG, e.g. 'backend', 'platform-orch'."),
+    },
+  }, async ({ name }) => {
+    if (!WATCHDOG_BIN)
+      return { content: [{ type: "text", text: "WATCHDOG_BIN not configured on broker — cannot start workers." }], isError: true };
+    const def = workerDefs.find(w => w.name === name);
+    if (!def)
+      return { content: [{ type: "text", text: `Worker "${name}" not found in config. Use list_workers to see available workers.` }], isError: true };
+    if (watchdogProcs.has(name)) {
+      const pid = watchdogProcs.get(name).pid;
+      return { content: [{ type: "text", text: `Worker "${name}" already running (pid ${pid}).` }] };
+    }
+    let outFd, errFd;
+    try {
+      mkdirSync(WORKERS_LOG_DIR, { recursive: true });
+      outFd = openSync(`${WORKERS_LOG_DIR}/${name}.out.log`, "a");
+      errFd = openSync(`${WORKERS_LOG_DIR}/${name}.err.log`, "a");
+    } catch (e) {
+      return { content: [{ type: "text", text: `Failed to open log files: ${e.message}` }], isError: true };
+    }
+    let proc;
+    try {
+      proc = spawn(WATCHDOG_BIN, def.args || [], { stdio: ["ignore", outFd, errFd], detached: true });
+      proc.unref();
+      closeSync(outFd);
+      closeSync(errFd);
+    } catch (e) {
+      return { content: [{ type: "text", text: `spawn failed: ${e.message}` }], isError: true };
+    }
+    proc.on("exit", (code) => {
+      console.log(`[claude-broker] watchdog "${name}" exited (code ${code ?? "?"})`);
+      watchdogProcs.delete(name);
+    });
+    watchdogProcs.set(name, { pid: proc.pid, proc, startedAt: Date.now() });
+    console.log(`[claude-broker] started watchdog "${name}" via MCP (pid ${proc.pid})`);
+    return { content: [{ type: "text", text: `Started "${name}" (pid ${proc.pid}). Logs: ${WORKERS_LOG_DIR}/${name}.{out,err}.log` }] };
+  });
+
+  // ── stop_worker ──────────────────────────────────────────────────────────────
+  server.registerTool("stop_worker", {
+    title: "Stop a worker watchdog",
+    description: "Stop the watchdog process for a named worker (SIGTERM to entire process group — kills watchdog + any in-flight Claude session). The worker will not restart until started again.",
+    inputSchema: {
+      name: z.string().min(1).describe("Worker name as defined in WORKERS_CONFIG, e.g. 'backend', 'platform-orch'."),
+    },
+  }, async ({ name }) => {
+    const entry = watchdogProcs.get(name);
+    if (!entry)
+      return { content: [{ type: "text", text: `Worker "${name}" is not running.` }], isError: true };
+    try {
+      process.kill(-entry.pid, "SIGTERM");
+      watchdogProcs.delete(name);
+      console.log(`[claude-broker] stopped watchdog "${name}" via MCP (pid ${entry.pid})`);
+      return { content: [{ type: "text", text: `Stopped "${name}" (pid ${entry.pid}).` }] };
+    } catch (e) {
+      watchdogProcs.delete(name);
+      return { content: [{ type: "text", text: `kill failed: ${e.message}` }], isError: true };
+    }
+  });
+
   return server;
 }
 
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
+
+// Reusable auth middleware — pass as route-level middleware on protected endpoints.
+function auth(req, res, next) {
+  if (!SHARED_SECRET) return next();
+  const header = req.headers.authorization || "";
+  if (header !== `Bearer ${SHARED_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now(), uptime_s: Math.floor((Date.now() - startedAt) / 1000) }));
@@ -552,6 +696,27 @@ app.get("/inbox", (req, res) => {
     "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
   ).get(channel, sinceId);
   res.json({ channel, since_id: sinceId, pending: row.n > 0, count: row.n, max_id: row.max_id });
+});
+
+// Batch inbox pre-check — single round-trip for N channels.
+// POST body: { "channel-name": since_id, ... }
+// Response:  { "channel-name": { pending, count, max_id }, ... }
+app.post("/inbox/batch", (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "body must be an object mapping channel to since_id" });
+  }
+  const stmt = db.prepare(
+    "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
+  );
+  const result = {};
+  for (const [channel, rawSinceId] of Object.entries(body)) {
+    const sinceId = parseInt(rawSinceId, 10);
+    if (isNaN(sinceId)) { result[channel] = { error: "since_id must be numeric" }; continue; }
+    const row = stmt.get(channel, sinceId);
+    result[channel] = { pending: row.n > 0, count: row.n, max_id: row.max_id };
+  }
+  res.json(result);
 });
 
 // ── Worker control endpoints ───────────────────────────────────────────────────
