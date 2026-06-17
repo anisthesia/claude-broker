@@ -1,37 +1,61 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "dogsvilla worker-inbox envelope (dv-backend / dv-frontend / dv-customer-portal)",
-  "description": "Messages dispatched by the orchestrator into a worker inbox.",
+  "title": "dogsvilla worker-inbox envelope",
+  "description": "Messages dispatched into a worker inbox (dv-backend, dv-frontend, dv-customer-portal, etc.).",
   "type": "object",
   "required": ["type", "task_id", "from", "to", "subject"],
   "properties": {
     "type": {
-      "enum": ["task", "question", "note", "approval-token", "approval-revoke", "contract-change"]
+      "enum": [
+        "task",
+        "question",
+        "note",
+        "approval-token",
+        "approval-revoke",
+        "contract-change",
+        "consent-grant",
+        "consent-deny",
+        "rotate",
+        "reload"
+      ]
     },
     "task_id": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$",
-      "description": "Format: <slug>-YYYY-MM-DD-<short-name>"
+      "minLength": 3,
+      "description": "Recommended format: <slug>-YYYY-MM-DD-<short-name>, e.g. 'add-auth-2026-06-09-jwt'."
     },
-    "from": { "const": "orchestrator" },
-    "to": { "enum": ["backend", "frontend", "customer-portal", "*"] },
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dispatcher identity: 'orchestrator', a domain orchestrator name, 'qa', or another dispatching worker."
+    },
+    "to": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target worker name, e.g. 'backend', 'frontend', 'customer-portal', or '*' for broadcast."
+    },
     "subject": { "type": "string", "minLength": 3 },
     "depends_on": {
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+:(backend|frontend|customer-portal)$"
+        "minLength": 3,
+        "description": "<task_id>:<worker> reference that must have a type:result before this task starts."
       },
-      "description": "<task_id>:<worker> references that must complete before this task starts."
+      "description": "Task IDs that must complete before this task starts."
     },
     "required_checks": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Exact commands the worker must run before reporting type:result, e.g. ['lint', 'build', 'test']."
+      "description": "Exact checks the worker must run before reporting type:result, e.g. ['lint', 'build', 'test', 'committed']."
     },
     "wire_compat": {
       "enum": ["additive", "breaking"],
       "description": "Required on type:contract-change."
+    },
+    "ui_verified_instructions": {
+      "type": "string",
+      "description": "Required when 'ui_verified' appears in required_checks. Exact screen, action, and expected outcome — specific enough that the worker cannot satisfy it by reading code alone. Example: 'Open /dogs/:id → click Award Badge → confirm dropdown shows badge names'."
     },
     "body": {},
     "refs": { "type": "array" }

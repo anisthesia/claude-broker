@@ -15,10 +15,11 @@ const SHARED_SECRET      = process.env.SHARED_SECRET                  || "";
 const DB_PATH            = process.env.DB_PATH                        || "./broker.db";
 const PRUNE_INTERVAL_MS  = Number(process.env.PRUNE_INTERVAL_MS)      || 5 * 60 * 1000;   // 5 min
 const PRUNE_MAX_AGE_MS   = Number(process.env.PRUNE_MAX_AGE_MS)       || 48 * 60 * 60 * 1000; // 48 h
-const PRUNE_EXEMPT       = (process.env.PRUNE_EXEMPT || "dv-backlog").split(",").map(s => s.trim()).filter(Boolean);
+const PRUNE_EXEMPT       = (process.env.PRUNE_EXEMPT || "dv-backlog,dv-sprint-retrospective").split(",").map(s => s.trim()).filter(Boolean);
 const WATCHDOG_BIN       = process.env.WATCHDOG_BIN                   || "";
 const WORKERS_CONFIG     = process.env.WORKERS_CONFIG                 || "";
 const WORKERS_LOG_DIR    = process.env.WORKERS_LOG_DIR                || "./worker-logs";
+const WORKER_OFFLINE_THRESHOLD_S = Number(process.env.WORKER_OFFLINE_THRESHOLD_S) || 300;
 
 // Worker definitions loaded from WORKERS_CONFIG JSON file.
 // Format: [{ "name": "backend", "ns": "dv", "args": ["backend"] }, ...]
@@ -77,7 +78,7 @@ const stmtSelectFilter = db.prepare(`
   SELECT id, sender, content, created_at FROM messages
   WHERE channel = ? AND id > ?
   AND (? IS NULL OR sender = ?)
-  AND (? IS NULL OR json_extract(content, '$.type') = ?)
+  AND (? IS NULL OR (json_valid(content) AND json_extract(content, '$.type') = ?))
   ORDER BY id ASC LIMIT ?
 `);
 const stmtSelectFilterMulti = new Map(); // keyed by "nSenders_hasType"
@@ -87,7 +88,7 @@ function getMultiSenderStmt(nSenders, hasType) {
   if (!stmtSelectFilterMulti.has(key)) {
     const ph = Array(nSenders).fill("?").join(",");
     let sql = `SELECT id, sender, content, created_at FROM messages WHERE channel = ? AND id > ? AND sender IN (${ph})`;
-    if (hasType) sql += ` AND json_extract(content, '$.type') = ?`;
+    if (hasType) sql += ` AND json_valid(content) AND json_extract(content, '$.type') = ?`;
     sql += ` ORDER BY id ASC LIMIT ?`;
     stmtSelectFilterMulti.set(key, db.prepare(sql));
   }
@@ -98,7 +99,13 @@ const stmtChans        = db.prepare("SELECT channel, COUNT(*) AS n, MAX(id) AS l
 const stmtPurge        = db.prepare("DELETE FROM messages WHERE channel = ?");
 const stmtPruneOlder   = db.prepare("DELETE FROM messages WHERE channel = ? AND created_at < ?");
 const stmtPruneAllOld  = db.prepare("DELETE FROM messages WHERE channel NOT IN (SELECT value FROM json_each(?)) AND created_at < ?");
-const stmtCheckResult  = db.prepare("SELECT COUNT(*) AS n FROM messages WHERE channel = ? AND json_extract(content, '$.task_id') = ? AND json_extract(content, '$.type') = 'result'");
+const stmtCheckResult  = db.prepare(`
+  SELECT COUNT(*) AS n,
+         MAX(CASE WHEN json_valid(content) AND json_extract(content, '$.type') = 'result'
+                  THEN json_extract(content, '$.summary') END) AS summary
+  FROM messages WHERE channel = ? AND json_valid(content)
+    AND json_extract(content, '$.task_id') = ? AND json_extract(content, '$.type') = 'result'
+`);
 
 const stmtSchemaGet    = db.prepare("SELECT channel, schema, strict, updated_at FROM channel_schemas WHERE channel = ?");
 const stmtSchemaUpsert = db.prepare(`
@@ -129,20 +136,120 @@ const stmtLatestMsgPerChannel = db.prepare(`
 const stmtSprintInfo = db.prepare(`
   SELECT content, created_at FROM messages
   WHERE channel = ?
+    AND json_valid(content)
     AND json_extract(content, '$.type') = 'note'
     AND json_extract(content, '$.subject') LIKE 'sprint-%'
   ORDER BY id DESC LIMIT 1
 `);
 
-// Sprint progress: task vs result counts on a status channel
+// Sprint progress: result/failed counts from the status channel.
+// Dispatched count comes from stmtSprintDispatched (inbox channels) — tasks never appear on the status channel.
 const stmtSprintProgress = db.prepare(`
   SELECT
-    COUNT(CASE WHEN json_extract(content, '$.type') = 'task'   THEN 1 END) AS dispatched,
-    COUNT(CASE WHEN json_extract(content, '$.type') = 'result' THEN 1 END) AS completed,
-    COUNT(CASE WHEN json_extract(content, '$.type') = 'result'
+    COUNT(CASE WHEN json_valid(content) AND json_extract(content, '$.type') = 'result' THEN 1 END) AS completed,
+    COUNT(CASE WHEN json_valid(content) AND json_extract(content, '$.type') = 'result'
                AND json_extract(content, '$.summary') LIKE '%FAIL%' THEN 1 END) AS failed
   FROM messages WHERE channel = ?
 `);
+
+const stmtHasMessages = db.prepare(
+  "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
+);
+
+const stmtDeleteOtherHeartbeats = db.prepare(
+  "DELETE FROM messages WHERE channel = ? AND sender = ? AND id != ?"
+);
+
+// Cached per-N prepared statements for check_results_batch
+const stmtBatchResultsCache = new Map();
+function getBatchResultsStmt(n) {
+  if (!stmtBatchResultsCache.has(n)) {
+    const ph = Array(n).fill("?").join(",");
+    stmtBatchResultsCache.set(n, db.prepare(
+      `SELECT DISTINCT json_extract(content, '$.task_id') AS task_id
+       FROM messages WHERE channel = ? AND json_valid(content)
+         AND json_extract(content, '$.type') = 'result'
+         AND json_extract(content, '$.task_id') IN (${ph})`
+    ));
+  }
+  return stmtBatchResultsCache.get(n);
+}
+const stmtReadLast = db.prepare(
+  "SELECT id, sender, content, created_at FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?"
+);
+
+// Count type:task messages dispatched into worker inboxes for a namespace (derived from status channel).
+// Excludes meta-channels (status, control, telemetry, backlog, sprint-retrospective).
+const stmtSprintDispatched = db.prepare(`
+  SELECT COUNT(*) AS n FROM messages
+  WHERE channel LIKE ?
+    AND channel NOT LIKE '%-status' AND channel NOT LIKE '%-control'
+    AND channel NOT LIKE '%-telemetry' AND channel NOT LIKE '%-backlog'
+    AND channel NOT LIKE '%-sprint-retrospective'
+    AND json_valid(content) AND json_extract(content, '$.type') = 'task'
+`);
+
+// Module-level prepared statements for /cost, /rate-limits, and dashboard (avoids inline prepare on each request).
+const stmtCostEndpointRows = db.prepare(
+  `SELECT sender, content, created_at FROM messages WHERE channel = 'dv-telemetry' AND created_at >= ? ORDER BY id ASC`
+);
+const stmtRlEndpointRows = db.prepare(
+  `SELECT sender, content, created_at FROM messages WHERE channel = 'dv-rate-limits' AND created_at >= ? ORDER BY id ASC`
+);
+const stmtDashCostRows = db.prepare(
+  `SELECT sender, content FROM messages WHERE channel LIKE '%-telemetry' AND created_at >= ? ORDER BY id ASC`
+);
+const stmtDashRlRows = db.prepare(
+  `SELECT sender, content FROM messages WHERE channel = 'dv-rate-limits' AND created_at >= ? ORDER BY id ASC`
+);
+
+// Per-worker task timing: join dispatch (worker inbox) with result (status channel) on task_id
+const stmtWorkerTiming = db.prepare(`
+  WITH dispatches AS (
+    SELECT json_extract(content,'$.task_id') AS task_id,
+           created_at AS dispatched_at,
+           SUBSTR(channel, INSTR(channel,'-')+1) AS worker
+    FROM messages
+    WHERE json_valid(content) AND json_extract(content,'$.type') = 'task'
+      AND channel NOT LIKE 'test%'
+      AND channel NOT LIKE '%-status' AND channel NOT LIKE '%-telemetry'
+      AND channel NOT LIKE '%-control' AND channel NOT LIKE '%-backlog'
+      AND channel NOT LIKE '%-sprint-retrospective'
+  ),
+  results AS (
+    SELECT json_extract(content,'$.task_id') AS task_id,
+           sender AS worker,
+           created_at AS completed_at
+    FROM messages
+    WHERE json_valid(content) AND json_extract(content,'$.type') = 'result'
+      AND channel LIKE '%-status'
+  )
+  SELECT r.worker,
+         COUNT(*) AS tasks_done,
+         ROUND(AVG(r.completed_at - d.dispatched_at) / 60000.0, 1) AS avg_min,
+         ROUND(MIN(r.completed_at - d.dispatched_at) / 60000.0, 1) AS min_min,
+         ROUND(MAX(r.completed_at - d.dispatched_at) / 60000.0, 1) AS max_min,
+         MAX(r.completed_at) AS last_result_at
+  FROM results r
+  JOIN dispatches d ON r.task_id = d.task_id AND r.worker = d.worker
+  WHERE r.completed_at > d.dispatched_at
+  GROUP BY r.worker
+`);
+
+const feedStmtCache = new Map(); // keyed by "nChannels_signalOnly"
+function getFeedStmt(nChannels, signalOnly) {
+  const key = `${nChannels}_${signalOnly ? 1 : 0}`;
+  if (!feedStmtCache.has(key)) {
+    const ph = Array(nChannels).fill("?").join(",");
+    const typeClause = signalOnly
+      ? `AND json_valid(content) AND json_extract(content, '$.type') IN ('task', 'result', 'question', 'error')`
+      : `AND json_valid(content)`;
+    feedStmtCache.set(key, db.prepare(
+      `SELECT id, channel, sender, content, created_at FROM messages WHERE channel IN (${ph}) ${typeClause} ORDER BY id DESC LIMIT ?`
+    ));
+  }
+  return feedStmtCache.get(key);
+}
 
 const stmtCapUpsert = db.prepare(`
   INSERT INTO capabilities (worker, owns, channels, updated_at) VALUES (?, ?, ?, ?)
@@ -150,6 +257,43 @@ const stmtCapUpsert = db.prepare(`
 `);
 const stmtCapList   = db.prepare("SELECT worker, owns, channels, updated_at FROM capabilities ORDER BY worker");
 const stmtCapDel    = db.prepare("DELETE FROM capabilities WHERE worker = ?");
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Reject channel names containing control characters or newlines (prevents log injection).
+function isValidChannelName(ch) {
+  return /^[^\x00-\x1f\x7f]+$/.test(ch);
+}
+
+// Expand ${VAR_NAME} placeholders in watchdog args using process.env, so workers-*.json
+// can use ${DOGSVILLA_WT_ROOT}/backend instead of hardcoded absolute paths.
+function expandArgs(args) {
+  return args.map(a => String(a).replace(/\$\{([^}]+)\}/g, (_, k) => process.env[k] ?? `\${${k}}`));
+}
+
+// Shared watchdog spawn logic. Throws on failure; callers handle errors.
+// model: optional model ID to override CLAUDE_MODEL env var for this session.
+function spawnWatchdogProc(def, { model } = {}) {
+  mkdirSync(WORKERS_LOG_DIR, { recursive: true });
+  const outFd = openSync(`${WORKERS_LOG_DIR}/${def.name}.out.log`, "a");
+  const errFd = openSync(`${WORKERS_LOG_DIR}/${def.name}.err.log`, "a");
+  const env = model ? { ...process.env, CLAUDE_MODEL: model } : process.env;
+  let proc;
+  try {
+    proc = spawn(WATCHDOG_BIN, expandArgs(def.args || []), { stdio: ["ignore", outFd, errFd], detached: true, env });
+  } finally {
+    closeSync(outFd);
+    closeSync(errFd);
+  }
+  proc.unref();
+  proc.on("exit", (code) => {
+    console.log(`[claude-broker] watchdog "${def.name}" exited (code ${code ?? "?"})`);
+    watchdogProcs.delete(def.name);
+  });
+  watchdogProcs.set(def.name, { pid: proc.pid, proc, startedAt: Date.now() });
+  console.log(`[claude-broker] started watchdog "${def.name}" (pid ${proc.pid}) → logs: ${WORKERS_LOG_DIR}/${def.name}.{out,err}.log`);
+  return proc;
+}
 
 // ── AJV schema validation ─────────────────────────────────────────────────────
 
@@ -212,13 +356,7 @@ function fetchFiltered(channel, sinceId, lim, filterSender, filterType) {
 
 function fetchFeedRows(channels, signalOnly, limit) {
   if (channels.length === 0) return [];
-  const typeClause = signalOnly
-    ? `AND json_extract(content, '$.type') IN ('result', 'question', 'error')`
-    : '';
-  const ph = channels.map(() => '?').join(',');
-  return db.prepare(
-    `SELECT id, channel, sender, content, created_at FROM messages WHERE channel IN (${ph}) ${typeClause} ORDER BY id DESC LIMIT ?`
-  ).all(...channels, limit);
+  return getFeedStmt(channels.length, signalOnly).all(...channels, limit);
 }
 
 // ── Background auto-pruning ───────────────────────────────────────────────────
@@ -248,6 +386,8 @@ function buildServer() {
       content: z.string().min(1).describe("Message body — plain text or JSON-as-string."),
     },
   }, async ({ channel, sender, content }) => {
+    if (!isValidChannelName(channel))
+      return { content: [{ type: "text", text: `invalid channel name '${channel}': control characters are not allowed.` }], isError: true };
     const check = validateContent(channel, content);
     if (!check.ok && check.strict) {
       return { content: [{ type: "text", text: `schema validation failed on '${channel}': ${check.errors}. Call get_channel_schema('${channel}') to see required fields.` }], isError: true };
@@ -282,7 +422,7 @@ function buildServer() {
     inputSchema: {
       channel:       z.string().min(1),
       since_id:      z.number().int().nonnegative().optional(),
-      timeout_ms:    z.number().int().positive().max(300000).optional().describe("Max wait in ms. Default 25000. Max 300000."),
+      timeout_ms:    z.number().int().positive().max(300000).optional().describe("Max wait in ms. Default 60000. Max 300000."),
       limit:         z.number().int().positive().max(500).optional(),
       filter_sender: z.string().optional().describe("Only wake/return for messages from this sender."),
       filter_type:   z.string().optional().describe("Only wake/return for messages where JSON content.type === this value."),
@@ -290,36 +430,42 @@ function buildServer() {
   }, async ({ channel, since_id, timeout_ms, limit, filter_sender, filter_type }) => {
     const sinceId = since_id ?? 0;
     const lim     = limit ?? 100;
-    const timeout = Math.min(timeout_ms ?? 25000, 300000);
+    const timeout = Math.min(timeout_ms ?? 60000, 300000);
     const event   = `msg:${channel}`;
-
-    // Check for existing matching messages immediately
-    const immediate = fetchFiltered(channel, sinceId, lim, filter_sender, filter_type);
-    if (immediate.length > 0) return formatRows(immediate, channel, sinceId);
 
     return new Promise((resolve) => {
       let timer = null;
+      let resolved = false;
 
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onMessage);
       }
 
+      function settle(result) {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(result);
+      }
+
       function onMessage() {
         const rows = fetchFiltered(channel, sinceId, lim, filter_sender, filter_type);
-        if (rows.length > 0) {
-          cleanup();
-          resolve(formatRows(rows, channel, sinceId));
-        }
+        if (rows.length > 0) settle(formatRows(rows, channel, sinceId));
         // Non-matching message — keep listener registered, timer keeps running
       }
 
-      timer = setTimeout(() => {
-        cleanup();
-        resolve({ content: [{ type: "text", text: `No new messages on '${channel}' within ${timeout}ms (since_id=${sinceId}).` }] });
-      }, timeout);
-
+      // Register listener BEFORE initial DB check to close the race window:
+      // a send_message that arrives between check and registration would be missed.
       messageBus.on(event, onMessage);
+
+      // Check for messages already present (including any that arrived before registration)
+      const immediate = fetchFiltered(channel, sinceId, lim, filter_sender, filter_type);
+      if (immediate.length > 0) { settle(formatRows(immediate, channel, sinceId)); return; }
+
+      timer = setTimeout(() => {
+        settle({ content: [{ type: "text", text: `No new messages on '${channel}' within ${timeout}ms (since_id=${sinceId}).` }] });
+      }, timeout);
     });
   });
 
@@ -414,7 +560,23 @@ function buildServer() {
     },
   }, async ({ channel, task_id }) => {
     const row = stmtCheckResult.get(channel, task_id);
-    return { content: [{ type: "text", text: JSON.stringify({ found: row.n > 0, task_id, channel }) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ found: row.n > 0, task_id, channel, summary: row.summary ?? null }) }] };
+  });
+
+  // ── check_results_batch ─────────────────────────────────────────────────────
+  server.registerTool("check_results_batch", {
+    title: "Batch-check task results",
+    description: "Check multiple task_ids for type:result messages in one call. Returns a map of task_id → found (boolean). Use at turn-start when multiple tasks may be queued — replaces N sequential check_result calls with one round-trip.",
+    inputSchema: {
+      channel:  z.string().min(1).describe("Channel to check (typically dv-status)."),
+      task_ids: z.array(z.string().min(1)).min(1).max(50).describe("Task IDs to check."),
+    },
+  }, async ({ channel, task_ids }) => {
+    const foundRows = getBatchResultsStmt(task_ids.length).all(channel, ...task_ids);
+    const foundSet  = new Set(foundRows.map(r => r.task_id));
+    const result    = {};
+    for (const task_id of task_ids) result[task_id] = foundSet.has(task_id);
+    return { content: [{ type: "text", text: JSON.stringify({ channel, results: result }) }] };
   });
 
   // ── has_messages ────────────────────────────────────────────────────────────
@@ -426,9 +588,7 @@ function buildServer() {
       since_id: z.number().int().min(0).default(0).describe("Only count messages with id > since_id."),
     },
   }, async ({ channel, since_id }) => {
-    const row = db.prepare(
-      "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
-    ).get(channel, since_id ?? 0);
+    const row = stmtHasMessages.get(channel, since_id ?? 0);
     return { content: [{ type: "text", text: JSON.stringify({ pending: row.n > 0, max_id: row.max_id, channel }) }] };
   });
 
@@ -441,9 +601,7 @@ function buildServer() {
       n:       z.number().int().min(1).max(100).default(20).describe("Number of most-recent messages to return."),
     },
   }, async ({ channel, n }) => {
-    const rows = db.prepare(
-      "SELECT id, sender, content, created_at FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?"
-    ).all(channel, n ?? 20);
+    const rows = stmtReadLast.all(channel, n ?? 20);
     rows.reverse();
     if (!rows.length) return { content: [{ type: "text", text: "No messages." }] };
     const text = rows.map(r => `[${r.id}] ${r.sender}: ${r.content}`).join("\n");
@@ -614,11 +772,12 @@ function buildServer() {
   // ── start_worker ─────────────────────────────────────────────────────────────
   server.registerTool("start_worker", {
     title: "Start a worker watchdog",
-    description: "Start the watchdog process for a named worker. The worker must be defined in the worker config (WORKERS_CONFIG). Returns the PID on success. No-ops (returns current PID) if already running.",
+    description: "Start the watchdog process for a named worker. The worker must be defined in the worker config (WORKERS_CONFIG). Returns the PID on success. No-ops (returns current PID) if already running. Pass model to override the default CLAUDE_MODEL for this session (e.g. 'claude-opus-4-7' for demanding tasks).",
     inputSchema: {
-      name: z.string().min(1).describe("Worker name as defined in WORKERS_CONFIG, e.g. 'backend', 'platform-orch'."),
+      name:  z.string().min(1).describe("Worker name as defined in WORKERS_CONFIG, e.g. 'backend', 'platform-orch'."),
+      model: z.string().min(1).optional().describe("Claude model ID to use for this session, e.g. 'claude-opus-4-7'. Overrides CLAUDE_MODEL env var. Omit to use the default (claude-haiku-4-5-20251001)."),
     },
-  }, async ({ name }) => {
+  }, async ({ name, model }) => {
     if (!WATCHDOG_BIN)
       return { content: [{ type: "text", text: "WATCHDOG_BIN not configured on broker — cannot start workers." }], isError: true };
     const def = workerDefs.find(w => w.name === name);
@@ -628,30 +787,132 @@ function buildServer() {
       const pid = watchdogProcs.get(name).pid;
       return { content: [{ type: "text", text: `Worker "${name}" already running (pid ${pid}).` }] };
     }
-    let outFd, errFd;
     try {
-      mkdirSync(WORKERS_LOG_DIR, { recursive: true });
-      outFd = openSync(`${WORKERS_LOG_DIR}/${name}.out.log`, "a");
-      errFd = openSync(`${WORKERS_LOG_DIR}/${name}.err.log`, "a");
+      const proc = spawnWatchdogProc(def, { model });
+      const modelNote = model ? ` [model: ${model}]` : "";
+      return { content: [{ type: "text", text: `Started "${name}" (pid ${proc.pid})${modelNote}. Logs: ${WORKERS_LOG_DIR}/${name}.{out,err}.log` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Failed to open log files: ${e.message}` }], isError: true };
+      return { content: [{ type: "text", text: `Failed to start "${name}": ${e.message}` }], isError: true };
     }
-    let proc;
-    try {
-      proc = spawn(WATCHDOG_BIN, def.args || [], { stdio: ["ignore", outFd, errFd], detached: true });
-      proc.unref();
-      closeSync(outFd);
-      closeSync(errFd);
-    } catch (e) {
-      return { content: [{ type: "text", text: `spawn failed: ${e.message}` }], isError: true };
-    }
-    proc.on("exit", (code) => {
-      console.log(`[claude-broker] watchdog "${name}" exited (code ${code ?? "?"})`);
-      watchdogProcs.delete(name);
+  });
+
+  // ── turn_start ───────────────────────────────────────────────────────────────
+  server.registerTool("turn_start", {
+    title: "Turn-start ritual in one call",
+    description: "Read inbox + control channels in a single round-trip. Returns JSON: {inbox, control, rotate_requested, inbox_next_id, control_next_id}. Replaces the 2 sequential read_messages calls that every worker does at turn start. rotate_requested is true if any unread control message has type='rotate'.",
+    inputSchema: {
+      inbox_channel:    z.string().min(1).describe("Worker inbox channel, e.g. dv-backend."),
+      control_channel:  z.string().min(1).describe("Broadcast control channel, e.g. dv-control."),
+      inbox_since_id:   z.number().int().nonnegative().default(0).describe("Return inbox messages with id > this. Default 0."),
+      control_since_id: z.number().int().nonnegative().default(0).describe("Return control messages with id > this. Default 0."),
+      limit:            z.number().int().positive().max(500).optional().describe("Max messages per channel. Default 100."),
+    },
+  }, async ({ inbox_channel, control_channel, inbox_since_id, control_since_id, limit }) => {
+    const lim         = limit ?? 100;
+    const inboxRows   = fetchFiltered(inbox_channel,   inbox_since_id   ?? 0, lim, null, null);
+    const controlRows = fetchFiltered(control_channel, control_since_id ?? 0, lim, null, null);
+
+    const rotateRequested = controlRows.some(r => {
+      try { return JSON.parse(r.content).type === "rotate"; } catch { return false; }
     });
-    watchdogProcs.set(name, { pid: proc.pid, proc, startedAt: Date.now() });
-    console.log(`[claude-broker] started watchdog "${name}" via MCP (pid ${proc.pid})`);
-    return { content: [{ type: "text", text: `Started "${name}" (pid ${proc.pid}). Logs: ${WORKERS_LOG_DIR}/${name}.{out,err}.log` }] };
+
+    const toMsgObj = r => ({ id: r.id, sender: r.sender, content: r.content, ts: new Date(r.created_at).toISOString() });
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      inbox:            inboxRows.map(toMsgObj),
+      control:          controlRows.map(toMsgObj),
+      rotate_requested: rotateRequested,
+      inbox_next_id:    inboxRows.length   > 0 ? inboxRows[inboxRows.length - 1].id   : (inbox_since_id   ?? 0),
+      control_next_id:  controlRows.length > 0 ? controlRows[controlRows.length - 1].id : (control_since_id ?? 0),
+    }) }] };
+  });
+
+  // ── send_message_batch ───────────────────────────────────────────────────────
+  server.registerTool("send_message_batch", {
+    title: "Send multiple messages in one call",
+    description: "Post an array of messages in a single SQLite transaction. Returns [{id, channel, sender}] for each message. Use when dispatching tasks to multiple workers simultaneously — replaces N send_message calls with one round-trip. Max 50 messages per call.",
+    inputSchema: {
+      messages: z.array(z.object({
+        channel: z.string().min(1),
+        sender:  z.string().min(1),
+        content: z.string().min(1),
+      })).min(1).max(50).describe("Array of messages to post."),
+    },
+  }, async ({ messages }) => {
+    const now     = Date.now();
+    const results = [];
+
+    // Validate all first; abort before any inserts if a strict schema fails
+    for (const msg of messages) {
+      const check = validateContent(msg.channel, msg.content);
+      if (!check.ok && check.strict) {
+        return { content: [{ type: "text", text: `schema validation failed on '${msg.channel}': ${check.errors}` }], isError: true };
+      }
+    }
+
+    db.transaction((msgs) => {
+      for (let i = 0; i < msgs.length; i++) {
+        const r = stmtInsert.run(msgs[i].channel, msgs[i].sender, msgs[i].content, now);
+        results.push({ id: r.lastInsertRowid, channel: msgs[i].channel, sender: msgs[i].sender, content: msgs[i].content });
+      }
+    })(messages);
+
+    for (const r of results) {
+      messageBus.emit(`msg:${r.channel}`, { id: r.id, sender: r.sender, content: r.content });
+    }
+
+    const summary = results.map(r => `#${r.id} → ${r.channel}`).join(", ");
+    return { content: [{ type: "text", text: `Sent ${results.length} messages: ${summary}` }] };
+  });
+
+  // ── upsert_heartbeat ─────────────────────────────────────────────────────────
+  server.registerTool("upsert_heartbeat", {
+    title: "Post a heartbeat (keep-latest-per-sender)",
+    description: "Post a message and immediately delete all older messages from this sender on this channel. Keeps the channel at exactly one row per sender — prevents telemetry channel bloat. Use instead of send_message for dv-telemetry heartbeats. Readable via get_latest_per_sender or read_messages as normal.",
+    inputSchema: {
+      channel: z.string().min(1).describe("Heartbeat channel, e.g. dv-telemetry."),
+      sender:  z.string().min(1).describe("Worker identifier."),
+      content: z.string().min(1).describe("Heartbeat payload — plain text or JSON-as-string."),
+    },
+  }, async ({ channel, sender, content }) => {
+    const now = Date.now();
+    const r   = stmtInsert.run(channel, sender, content, now);
+    const id  = r.lastInsertRowid;
+    stmtDeleteOtherHeartbeats.run(channel, sender, id);
+    messageBus.emit(`msg:${channel}`, { id, sender, content });
+    return { content: [{ type: "text", text: `Heartbeat #${id} posted for '${sender}' on '${channel}' at ${new Date(now).toISOString()}.` }] };
+  });
+
+  // ── sprint_summary ───────────────────────────────────────────────────────────
+  server.registerTool("sprint_summary", {
+    title: "Get sprint progress summary",
+    description: "Returns dispatched/completed/failed task counts for a status channel, plus the latest sprint boundary note from the control channel. One SQL aggregation instead of reading the full channel history. Use for orchestrator ledger sync at turn-start.",
+    inputSchema: {
+      status_channel:  z.string().min(1).describe("The status channel, e.g. dv-status."),
+      control_channel: z.string().optional().describe("If set, include the latest sprint boundary note from this channel."),
+    },
+  }, async ({ status_channel, control_channel }) => {
+    const progress   = stmtSprintProgress.get(status_channel) || { completed: 0, failed: 0 };
+    // Derive namespace prefix (e.g. "dv" from "dv-status") to query worker inbox channels.
+    const ns         = status_channel.includes('-') ? status_channel.slice(0, status_channel.lastIndexOf('-')) : status_channel;
+    const dispatched = stmtSprintDispatched.get(`${ns}-%`).n;
+    let sprint = null;
+    if (control_channel) {
+      const row = stmtSprintInfo.get(control_channel);
+      if (row) {
+        let subject = "", body = "";
+        try { const p = JSON.parse(row.content); subject = p.subject || ""; body = typeof p.body === "string" ? p.body : ""; } catch {}
+        sprint = { subject, body, started_at: new Date(row.created_at).toISOString() };
+      }
+    }
+    return { content: [{ type: "text", text: JSON.stringify({
+      status_channel,
+      dispatched,
+      completed:   progress.completed,
+      failed:      progress.failed,
+      pending:     dispatched - progress.completed,
+      sprint,
+    }) }] };
   });
 
   // ── stop_worker ──────────────────────────────────────────────────────────────
@@ -703,9 +964,7 @@ app.get("/inbox", (req, res) => {
   if (!channel) return res.status(400).json({ error: "channel required" });
   const sinceId = parseInt(since_id, 10);
   if (isNaN(sinceId)) return res.status(400).json({ error: "since_id must be numeric" });
-  const row = db.prepare(
-    "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
-  ).get(channel, sinceId);
+  const row = stmtHasMessages.get(channel, sinceId);
   res.json({ channel, since_id: sinceId, pending: row.n > 0, count: row.n, max_id: row.max_id });
 });
 
@@ -717,14 +976,11 @@ app.post("/inbox/batch", (req, res) => {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return res.status(400).json({ error: "body must be an object mapping channel to since_id" });
   }
-  const stmt = db.prepare(
-    "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id FROM messages WHERE channel = ? AND id > ?"
-  );
   const result = {};
   for (const [channel, rawSinceId] of Object.entries(body)) {
     const sinceId = parseInt(rawSinceId, 10);
     if (isNaN(sinceId)) { result[channel] = { error: "since_id must be numeric" }; continue; }
-    const row = stmt.get(channel, sinceId);
+    const row = stmtHasMessages.get(channel, sinceId);
     result[channel] = { pending: row.n > 0, count: row.n, max_id: row.max_id };
   }
   res.json(result);
@@ -732,20 +988,22 @@ app.post("/inbox/batch", (req, res) => {
 
 // REST send endpoint — lets non-MCP clients (watchdog.sh, scripts) post messages.
 // POST /messages  body: { channel, sender, content }
-// No auth required (same trust level as /inbox read endpoints).
-app.post("/messages", (req, res) => {
+// Auth required when SHARED_SECRET is set (set BROKER_SECRET in watchdog env to match).
+app.post("/messages", auth, (req, res) => {
   const { channel, sender, content } = req.body || {};
   if (!channel || !sender || content === undefined)
     return res.status(400).json({ error: "channel, sender, content required" });
+  if (!isValidChannelName(channel))
+    return res.status(400).json({ error: `invalid channel name: control characters are not allowed` });
   const contentStr = typeof content === "string" ? content : JSON.stringify(content);
   const row = stmtInsert.run(channel, sender, contentStr, Date.now());
-  emitter.emit(channel, { id: row.lastInsertRowid, channel, sender, content: contentStr });
+  messageBus.emit(`msg:${channel}`, { id: row.lastInsertRowid, channel, sender, content: contentStr });
   res.json({ id: row.lastInsertRowid, channel, sender });
 });
 
 // ── Worker control endpoints ───────────────────────────────────────────────────
 
-app.get("/workers", (_req, res) => {
+app.get("/workers", auth, (_req, res) => {
   res.json(workerDefs.map(w => ({
     name:      w.name,
     ns:        w.ns   || null,
@@ -756,46 +1014,23 @@ app.get("/workers", (_req, res) => {
   })));
 });
 
-app.post("/workers/:name/start", (req, res) => {
+app.post("/workers/:name/start", auth, (req, res) => {
   const { name } = req.params;
+  const model = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : undefined;
   const def = workerDefs.find(w => w.name === name);
   if (!def)                    return res.status(404).json({ error: `Worker "${name}" not in config` });
   if (watchdogProcs.has(name)) return res.status(409).json({ error: `Worker "${name}" already running (pid ${watchdogProcs.get(name).pid})` });
   if (!WATCHDOG_BIN)           return res.status(503).json({ error: "WATCHDOG_BIN not configured" });
 
-  let outFd, errFd;
   try {
-    mkdirSync(WORKERS_LOG_DIR, { recursive: true });
-    outFd = openSync(`${WORKERS_LOG_DIR}/${name}.out.log`, "a");
-    errFd = openSync(`${WORKERS_LOG_DIR}/${name}.err.log`, "a");
+    const proc = spawnWatchdogProc(def, { model });
+    res.json({ ok: true, name, pid: proc.pid, ...(model && { model }) });
   } catch (e) {
-    return res.status(500).json({ error: `Failed to open log files: ${e.message}` });
+    res.status(500).json({ error: e.message });
   }
-
-  let proc;
-  try {
-    proc = spawn(WATCHDOG_BIN, def.args || [], {
-      stdio:    ["ignore", outFd, errFd],
-      detached: true,
-    });
-    proc.unref();
-    closeSync(outFd);
-    closeSync(errFd);
-  } catch (e) {
-    return res.status(500).json({ error: `spawn failed: ${e.message}` });
-  }
-
-  proc.on("exit", (code) => {
-    console.log(`[claude-broker] watchdog "${name}" exited (code ${code ?? "?"})`);
-    watchdogProcs.delete(name);
-  });
-
-  watchdogProcs.set(name, { pid: proc.pid, proc, startedAt: Date.now() });
-  console.log(`[claude-broker] started watchdog "${name}" (pid ${proc.pid}) → logs: ${WORKERS_LOG_DIR}/${name}.{out,err}.log`);
-  res.json({ ok: true, name, pid: proc.pid });
 });
 
-app.post("/workers/:name/stop", (req, res) => {
+app.post("/workers/:name/stop", auth, (req, res) => {
   const { name } = req.params;
   const entry = watchdogProcs.get(name);
   if (!entry) return res.status(404).json({ error: `Worker "${name}" not running` });
@@ -813,16 +1048,12 @@ app.post("/workers/:name/stop", (req, res) => {
 
 // GET /cost?since=<ISO-date> — aggregate session costs from dv-telemetry.
 // Returns { total_usd, sessions, by_worker: [{worker, sessions, total_usd}] }
-app.get("/cost", (req, res) => {
+app.get("/cost", auth, (req, res) => {
   const since = req.query.since
     ? new Date(req.query.since).getTime()
     : Date.now() - 24 * 60 * 60 * 1000; // default: last 24h
 
-  const rows = db.prepare(
-    `SELECT sender, content, created_at FROM messages
-     WHERE channel = 'dv-telemetry' AND created_at >= ?
-     ORDER BY id ASC`
-  ).all(since);
+  const rows = stmtCostEndpointRows.all(since);
 
   const byWorker = {};
   for (const row of rows) {
@@ -839,6 +1070,35 @@ app.get("/cost", (req, res) => {
   const workers = Object.values(byWorker).sort((a, b) => b.total_usd - a.total_usd);
   const total_usd = Math.round(workers.reduce((s, w) => s + w.total_usd, 0) * 10000) / 10000;
   res.json({ total_usd, sessions: workers.reduce((s, w) => s + w.sessions, 0), since: new Date(since).toISOString(), by_worker: workers });
+});
+
+// GET /rate-limits?since=<ISO-date>&worker=<name>
+// Returns rate limit hit log from dv-rate-limits channel.
+// { total_hits, by_worker: [{worker, hits, models, total_backoff_s, last_hit}], events: [...] }
+app.get("/rate-limits", auth, (req, res) => {
+  const since = req.query.since
+    ? new Date(req.query.since).getTime()
+    : Date.now() - 7 * 24 * 60 * 60 * 1000; // default: last 7 days
+
+  const rows = stmtRlEndpointRows.all(since);
+
+  const byWorker = {};
+  const events = [];
+  for (const row of rows) {
+    let r = {};
+    try { r = JSON.parse(row.content); } catch { continue; }
+    const w = row.sender;
+    if (!byWorker[w]) byWorker[w] = { worker: w, hits: 0, models: {}, total_backoff_s: 0, last_hit: null };
+    byWorker[w].hits++;
+    byWorker[w].total_backoff_s += r.backoff_s || 0;
+    byWorker[w].last_hit = r.ts || new Date(row.created_at).toISOString();
+    const model = r.model || 'unknown';
+    byWorker[w].models[model] = (byWorker[w].models[model] || 0) + 1;
+    events.push({ worker: w, ts: r.ts, model, backoff_s: r.backoff_s, start_reason: r.start_reason, restart_count: r.restart_count });
+  }
+
+  const workers = Object.values(byWorker).sort((a, b) => b.hits - a.hits);
+  res.json({ total_hits: workers.reduce((s, w) => s + w.hits, 0), since: new Date(since).toISOString(), by_worker: workers, events });
 });
 
 // Dashboard helpers
@@ -893,10 +1153,10 @@ app.get("/dashboard", (req, res) => {
     if (!row) return null;
     let subject = "", body = "";
     try { const p = JSON.parse(row.content); subject = p.subject || ""; body = typeof p.body === "string" ? p.body : ""; } catch {}
-    // Extract slug: "sprint-2026-06-04-foo opened…" → "sprint-2026-06-04-foo"
-    const slug = subject.split(/\s+/)[0] || subject;
-    const progress = stmtSprintProgress.get(statusChan) || { dispatched: 0, completed: 0, failed: 0 };
-    return { ns, slug, startedAt: row.created_at, body, ...progress };
+    const slug       = subject.split(/\s+/)[0] || subject;
+    const progress   = stmtSprintProgress.get(statusChan) || { completed: 0, failed: 0 };
+    const dispatched = stmtSprintDispatched.get(`${ns}-%`).n;
+    return { ns, slug, startedAt: row.created_at, body, dispatched, ...progress };
   }
 
   const sprintInfos = isAll
@@ -905,9 +1165,7 @@ app.get("/dashboard", (req, res) => {
 
   // ── Today's cost summary from telemetry (session-end heartbeats) ─────────────
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-  const costRows = db.prepare(
-    `SELECT sender, content FROM messages WHERE channel LIKE '%-telemetry' AND created_at >= ? ORDER BY id ASC`
-  ).all(todayStart.getTime());
+  const costRows = stmtDashCostRows.all(todayStart.getTime());
   const costByWorker = {};
   for (const r of costRows) {
     let hb = {}; try { hb = JSON.parse(r.content); } catch { continue; }
@@ -917,6 +1175,15 @@ app.get("/dashboard", (req, res) => {
     costByWorker[r.sender] = Math.round((costByWorker[r.sender] + usd) * 10000) / 10000;
   }
   const totalCostToday = Math.round(Object.values(costByWorker).reduce((s, v) => s + v, 0) * 10000) / 10000;
+
+  // ── Rate limit hits today ─────────────────────────────────────────────────────
+  const rlRows = stmtDashRlRows.all(todayStart.getTime());
+  const rlByWorker = {};
+  for (const r of rlRows) {
+    let rec = {}; try { rec = JSON.parse(r.content); } catch { continue; }
+    rlByWorker[r.sender] = (rlByWorker[r.sender] || 0) + 1;
+  }
+  const totalRlToday = Object.values(rlByWorker).reduce((s, v) => s + v, 0);
 
   // ── Worker liveness from telemetry ──────────────────────────────────────────
   // For selected ns, read <ns>-telemetry (or all *-telemetry channels if "all")
@@ -946,13 +1213,13 @@ app.get("/dashboard", (req, res) => {
     const inboxChan  = `${row._ns}-${row.sender}`;
     const inboxCount = channelCountMap.get(inboxChan) || 0;
 
-    // on-demand model: offline between tasks is normal, not an alarm
+    // on-demand model: offline between tasks is normal — use WORKER_OFFLINE_THRESHOLD_S (default 300s)
     let status;
     if (state === "working" && ageSec <= 600) {
       status = "running";
     } else if (state === "working" && ageSec > 600) {
       status = "crashed";
-    } else if (ageSec <= 120) {
+    } else if (ageSec <= WORKER_OFFLINE_THRESHOLD_S) {
       status = inboxCount > 0 ? "queued" : "idle";
     } else {
       status = inboxCount > 0 ? "queued" : "offline";
@@ -1003,12 +1270,22 @@ app.get("/dashboard", (req, res) => {
     workers.sort((a,b) => a.sender.localeCompare(b.sender));
   }
 
+  // ── Per-worker task timing ────────────────────────────────────────────────────
+  const timingMap = new Map();
+  try { stmtWorkerTiming.all().forEach(r => timingMap.set(r.worker, r)); } catch {}
+
   // ── Activity feed ─────────────────────────────────────────────────────────────
   const feedSignalOnly = req.query.feed !== "all";
-  const statusChannels = isAll
-    ? allChannels.filter(r => r.channel.endsWith("-status")).map(r => r.channel)
-    : allChannels.some(r => r.channel === `${selectedNs}-status`) ? [`${selectedNs}-status`] : [];
-  const feedRows = fetchFeedRows(statusChannels, feedSignalOnly, 50);
+  const FEED_META = new Set(["telemetry", "control", "backlog", "sprint-retrospective"]);
+  const feedChannels = allChannels.filter(r => {
+    if (r.channel.startsWith("test")) return false;
+    const ns     = nsOf(r.channel);
+    const suffix = r.channel.slice(ns.length + 1);
+    if (FEED_META.has(suffix)) return false;
+    if (!isAll && ns !== selectedNs) return false;
+    return true;
+  }).map(r => r.channel);
+  const feedRows = feedChannels.length ? getFeedStmt(feedChannels.length, feedSignalOnly).all(...feedChannels, 100) : [];
   const questionRows = feedRows.filter(r => {
     try { return JSON.parse(r.content).type === "question"; } catch { return false; }
   });
@@ -1025,11 +1302,15 @@ app.get("/dashboard", (req, res) => {
     let parsed = {};
     try { parsed = JSON.parse(r.content); } catch {}
     const type    = parsed.type || "?";
-    const rawText = parsed.summary || parsed.subject || parsed.body || parsed.text || r.content;
-    const summary = String(rawText).slice(0, 120);
-    const taskTag = parsed.task_id
-      ? `<span class="feed-taskid">${escHtml(String(parsed.task_id).slice(-12))}</span>` : "";
+    const rawText = parsed.summary || parsed.subject || (typeof parsed.body === "string" ? parsed.body : null) || r.content;
+    const summary = String(rawText).slice(0, 100);
+    const taskId  = parsed.task_id ? String(parsed.task_id) : "";
+    const from    = escHtml(parsed.from || r.sender);
+    const to      = parsed.to ? escHtml(String(parsed.to)) : "";
     const chanTag = isAll ? `<span class="feed-chan">${escHtml(r.channel)}</span>` : "";
+    const dirCell = to
+      ? `${from} <span class="feed-arrow">→</span> <span class="feed-to">${to}</span>${chanTag}`
+      : `${from}${chanTag}`;
     let badgeClass;
     if      (type === "result")   badgeClass = "feed-result";
     else if (type === "question") badgeClass = "feed-question";
@@ -1039,8 +1320,9 @@ app.get("/dashboard", (req, res) => {
     return `<tr class="${type === "question" ? "feed-row-q" : ""}">
       <td class="feed-time">${agoStr(r.created_at)}</td>
       <td><span class="feed-badge ${badgeClass}">${escHtml(type)}</span></td>
-      <td class="feed-sender">${escHtml(r.sender)}${chanTag}</td>
-      <td class="feed-content">${escHtml(summary)}${summary.length >= 120 ? "…" : ""}${taskTag}</td>
+      <td class="feed-sender">${dirCell}</td>
+      <td class="feed-taskid-col" title="${escHtml(taskId)}">${taskId ? escHtml(taskId.slice(-22)) : '<span class="dim">—</span>'}</td>
+      <td class="feed-content">${escHtml(summary)}${summary.length >= 100 ? "…" : ""}</td>
     </tr>`;
   };
 
@@ -1049,7 +1331,8 @@ app.get("/dashboard", (req, res) => {
       let p = {};
       try { p = JSON.parse(r.content); } catch {}
       const from = escHtml(p.from || r.sender);
-      const body = escHtml(String(p.body || p.subject || r.content).slice(0, 200));
+      const bodyText = p.subject || (typeof p.body === 'string' ? p.body : null) || r.content;
+      const body = escHtml(String(bodyText).slice(0, 200));
       const tid  = p.task_id ? ` <span class="feed-taskid">[${escHtml(p.task_id)}]</span>` : "";
       return `<div class="questions-alert-item"><strong>${from}</strong>: ${body}${tid}</div>`;
     }).join("");
@@ -1060,8 +1343,8 @@ app.get("/dashboard", (req, res) => {
   })() : "";
 
   const feedTableHtml = feedRows.length === 0
-    ? `<div class="empty">No ${feedSignalOnly ? "signal " : ""}messages yet${statusChannels.length > 0 ? ` on ${escHtml(statusChannels.join(", "))}` : " (no *-status channels found)"}.</div>`
-    : `<table><thead><tr><th>Time</th><th>Type</th><th>Worker${isAll ? " / Channel" : ""}</th><th>Summary</th></tr></thead><tbody>${feedRows.map(renderFeedRow).join("\n")}</tbody></table>`;
+    ? `<div class="empty">No ${feedSignalOnly ? "signal " : ""}messages yet${feedChannels.length > 0 ? ` on ${escHtml(feedChannels.slice(0,5).join(", "))}${feedChannels.length > 5 ? ` +${feedChannels.length - 5} more` : ""}` : " (no channels found)"}.</div>`
+    : `<table><thead><tr><th>Time</th><th>Type</th><th>From${isAll ? " / Channel" : ""} → To</th><th>Task ID</th><th>Summary</th></tr></thead><tbody>${feedRows.map(renderFeedRow).join("\n")}</tbody></table>`;
 
   // Annotate each worker with managed/running flags for Start/Stop buttons
   workers.forEach(w => {
@@ -1133,11 +1416,25 @@ app.get("/dashboard", (req, res) => {
         ? `<button class="btn-stop"  onclick="workerAction('${escHtml(w.sender)}','stop')">Stop</button>`
         : `<button class="btn-start" onclick="workerAction('${escHtml(w.sender)}','start')">Start</button>`
       : (hasActions ? '<span class="dim">—</span>' : "");
+    const t = timingMap.get(w.sender);
+    const timingCell = t
+      ? `<span class="timing-avg" title="min ${t.min_min}m · max ${t.max_min}m · ${t.tasks_done} task${t.tasks_done !== 1 ? 's' : ''}">${t.avg_min}m avg</span>`
+      : '<span class="dim">—</span>';
+
+    let idleCell = '<span class="dim">—</span>';
+    if (w.status === "running") {
+      idleCell = '<span class="dim">active</span>';
+    } else if (t && t.last_result_at) {
+      idleCell = `<span class="idle-time">${agoStr(t.last_result_at)}</span>`;
+    }
+
     return `<tr>
       <td><span class="dot ${dotClass}"></span> ${escHtml(w.sender)}${rotBadge}</td>
       <td>${stateLabel}</td>
       <td>${taskCell}</td>
       <td>${costCell}</td>
+      <td>${timingCell}</td>
+      <td>${idleCell}</td>
       <td>${inboxCell}</td>
       <td>${lastSeen}</td>
       ${hasActions ? `<td>${actionCell}</td>` : ""}
@@ -1253,6 +1550,11 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
   .feed-taskid{font-size:10px;color:#484f58;margin-left:8px}
   .feed-row-q td{background:#1a1400}
   .feed-row-q:hover td{background:#241c00 !important}
+  .feed-taskid-col{font-size:10px;color:#484f58;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+  .feed-arrow{color:#484f58;margin:0 2px}
+  .feed-to{color:#e3b341}
+  .timing-avg{color:#79c0ff;cursor:default}
+  .idle-time{color:#8b949e}
 </style>
 </head>
 <body>
@@ -1299,10 +1601,12 @@ ${totalCostToday > 0 ? `<div class="cost-bar">
   ${Object.entries(costByWorker).sort((a,b)=>b[1]-a[1]).map(([w,c])=>`<span class="cost-bar-worker"><span class="cost-bar-wname">${escHtml(w)}</span> $${c.toFixed(4)}</span>`).join("")}
   <a href="/cost" class="cost-bar-link" target="_blank">JSON</a>
 </div>` : ""}
-<h2>Worker Liveness ${nsLabel}</h2>
-${workers.length === 0
-  ? `<div class="empty">No telemetry yet${isAll ? "" : ` for "${selectedNs}"`}. Workers emit heartbeats to <code>${isAll ? "*-telemetry" : telemetryChan}</code>.</div>`
-  : `<table><thead><tr><th>Worker</th><th>State</th><th>Current Task</th><th>Cost</th><th>Inbox</th><th>Last Seen</th>${hasActions ? "<th>Actions</th>" : ""}</tr></thead><tbody>${workerRows}</tbody></table>`}
+${totalRlToday > 0 ? `<div class="cost-bar" style="border-color:#6e4c00">
+  <span class="cost-bar-label" style="color:#e3b341">Rate limits today</span>
+  <span class="cost-bar-total" style="color:#e3b341">${totalRlToday} hit${totalRlToday !== 1 ? "s" : ""}</span>
+  ${Object.entries(rlByWorker).sort((a,b)=>b[1]-a[1]).map(([w,n])=>`<span class="cost-bar-worker"><span class="cost-bar-wname">${escHtml(w)}</span> ${n}×</span>`).join("")}
+  <a href="/rate-limits" class="cost-bar-link" target="_blank">JSON</a>
+</div>` : ""}
 
 <div class="section-hdr">
   Activity Feed ${nsLabel}
@@ -1312,6 +1616,11 @@ ${workers.length === 0
   </span>
 </div>
 ${feedTableHtml}
+
+<h2>Worker Liveness ${nsLabel}</h2>
+${workers.length === 0
+  ? `<div class="empty">No telemetry yet${isAll ? "" : ` for "${selectedNs}"`}. Workers emit heartbeats to <code>${isAll ? "*-telemetry" : telemetryChan}</code>.</div>`
+  : `<table><thead><tr><th>Worker</th><th>State</th><th>Current Task</th><th>Cost</th><th>Avg Task Time</th><th>Idle Since</th><th>Inbox</th><th>Last Seen</th>${hasActions ? "<th>Actions</th>" : ""}</tr></thead><tbody>${workerRows}</tbody></table>`}
 
 <h2>Channels ${nsLabel}</h2>
 ${channels.length === 0

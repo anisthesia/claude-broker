@@ -1,16 +1,31 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "dogsvilla dv-control envelope",
-  "description": "Orchestrator broadcasts: contract changes, approval tokens, policy updates.",
+  "description": "Orchestrator broadcasts: contract changes, approval tokens, policy updates, rotation commands, consent relay.",
   "type": "object",
   "required": ["type", "task_id", "from", "to", "subject"],
   "properties": {
     "type": {
-      "enum": ["contract-change", "approval-token", "approval-revoke", "note", "policy-update"]
+      "enum": [
+        "contract-change",
+        "approval-token",
+        "approval-revoke",
+        "note",
+        "policy-update",
+        "rotate",
+        "reload",
+        "consent-grant",
+        "consent-deny",
+        "ledger-snapshot"
+      ]
     },
     "task_id": { "type": "string", "minLength": 3 },
-    "from": { "const": "orchestrator" },
-    "to": { "enum": ["backend", "frontend", "customer-portal", "*"] },
+    "from": { "type": "string", "minLength": 1, "description": "Dispatcher identity, typically 'orchestrator' or a domain orchestrator name." },
+    "to": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target: a worker name, domain orchestrator name ('platform-orch', 'consumer-orch', 'growth-orch', 'intel-orch'), or '*' for broadcast."
+    },
     "subject": { "type": "string", "minLength": 3 },
     "wire_compat": { "enum": ["additive", "breaking"] },
     "body": {},
@@ -52,6 +67,7 @@
     {
       "if": { "properties": { "type": { "const": "approval-revoke" } }, "required": ["type"] },
       "then": {
+        "required": ["body"],
         "properties": {
           "body": {
             "type": "object",

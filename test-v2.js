@@ -4,6 +4,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import "dotenv/config";
 
 const BROKER_URL = process.env.BROKER_URL || "http://localhost:8080/mcp";
 const SECRET     = process.env.SHARED_SECRET || "";
@@ -91,6 +92,30 @@ async function run() {
 
   const waitResult = await waitPromise;
   assert(waitResult.includes('"special"') && !waitResult.includes('"irrelevant"'), "wait_for_messages filter_type skips non-matching, wakes on match");
+
+  // Basic wait — pre-existing messages returned immediately (no filter)
+  const wch2 = `test-wait-basic-${Date.now()}`;
+  await call(a, "send_message", { channel: wch2, sender: "x", content: JSON.stringify({ type: "note", v: 1 }) });
+  const basicWait = await call(b, "wait_for_messages", { channel: wch2, since_id: 0 });
+  assert(basicWait.includes('"note"'), "wait_for_messages basic: pre-existing message returned immediately");
+
+  // Timeout path — empty channel, short timeout
+  const wch3 = `test-wait-timeout-${Date.now()}`;
+  const t0 = Date.now();
+  const timedOut = await call(b, "wait_for_messages", { channel: wch3, since_id: 0, timeout_ms: 500 });
+  const elapsed = Date.now() - t0;
+  assert(timedOut.includes("No new messages"), "wait_for_messages timeout: returns no-messages text");
+  assert(elapsed >= 400, `wait_for_messages timeout: respected (~500ms, got ${elapsed}ms)`);
+
+  // filter_sender in wait context — non-matching sender skipped, matching sender wakes it
+  const wch4 = `test-wait-fs-${Date.now()}`;
+  const fswPromise = call(b, "wait_for_messages", { channel: wch4, since_id: 0, timeout_ms: 5000, filter_sender: "target" });
+  await new Promise(r => setTimeout(r, 100));
+  await call(a, "send_message", { channel: wch4, sender: "other",  content: JSON.stringify({ type: "note", v: 1 }) });
+  await new Promise(r => setTimeout(r, 100));
+  await call(a, "send_message", { channel: wch4, sender: "target", content: JSON.stringify({ type: "note", v: 2 }) });
+  const fswResult = await fswPromise;
+  assert(fswResult.includes("target") && !fswResult.includes("other"), "wait_for_messages filter_sender: skips non-matching sender, wakes on match");
 
   // ── 5. delete_message ────────────────────────────────────────────────────
   console.log("\n5. delete_message");
@@ -186,6 +211,23 @@ async function run() {
     timeout_ms:    500,
   });
   assert(timeoutRes.includes("Timed out"), "post_gated_message times out when dep never arrives");
+
+  // Immediately satisfied — result already on watch_channel before the call
+  const igch  = `test-gate-imm-${Date.now()}`;
+  const iwsch = `test-gate-imm-watch-${Date.now()}`;
+  const iTaskId = `task-imm-${Date.now()}`;
+  await call(a, "send_message", { channel: iwsch, sender: "worker", content: JSON.stringify({ type: "result", task_id: iTaskId, summary: "pre-done" }) });
+  const immRes = await call(a, "post_gated_message", {
+    channel:       igch,
+    sender:        "orchestrator",
+    content:       JSON.stringify({ type: "task", msg: "immediate gate" }),
+    depends_on:    [iTaskId],
+    watch_channel: iwsch,
+    timeout_ms:    5000,
+  });
+  assert(immRes.includes("All deps satisfied immediately"), "post_gated_message: immediately satisfied path fires without waiting");
+  const afterImm = await call(a, "read_messages", { channel: igch, since_id: 0 });
+  assert(afterImm.includes("immediate gate"), "post_gated_message: immediately satisfied message visible in channel");
 
   // ── 9. list_channels includes last_activity ───────────────────────────────
   console.log("\n9. list_channels last_activity");
@@ -376,8 +418,54 @@ async function run() {
   assert(toolNames.includes("start_worker"), "start_worker registered in tool list");
   assert(toolNames.includes("stop_worker"),  "stop_worker registered in tool list");
 
+  // ── 17. get_channel_schema / list_channel_schemas / clear_channel_schema ─────
+  console.log("\n17. Channel schema tools (get / list / clear)");
+  const ssch  = `test-schema-${Date.now()}`;
+  const ssch2 = `test-schema2-${Date.now()}`;
+
+  await call(a, "register_channel_schema", { channel: ssch,  schema: JSON.stringify({ type: "object" }), strict: false });
+  await call(a, "register_channel_schema", { channel: ssch2, schema: JSON.stringify({ type: "object" }), strict: true  });
+
+  // get_channel_schema — channel with schema
+  const gcs1 = await call(a, "get_channel_schema", { channel: ssch });
+  assert(gcs1.includes(ssch),    "get_channel_schema: channel name in response");
+  assert(gcs1.includes("off"),   "get_channel_schema: strict=off echoed");
+  assert(gcs1.includes('"type"'), "get_channel_schema: schema body returned");
+
+  // get_channel_schema — no schema registered
+  const gcs2 = await call(a, "get_channel_schema", { channel: `test-free-form-${Date.now()}` });
+  assert(/No schema|free-form/.test(gcs2), "get_channel_schema: unregistered channel returns free-form text");
+
+  // list_channel_schemas — both channels appear
+  const lcs1 = await call(a, "list_channel_schemas", {});
+  assert(lcs1.includes(ssch),       "list_channel_schemas: first channel listed");
+  assert(lcs1.includes(ssch2),      "list_channel_schemas: second channel listed");
+  assert(lcs1.includes("strict=on"), "list_channel_schemas: strict=on channel present");
+
+  // clear_channel_schema — reverts channel to free-form
+  await call(a, "clear_channel_schema", { channel: ssch });
+  const gcs3 = await call(a, "get_channel_schema", { channel: ssch });
+  assert(/No schema|free-form/.test(gcs3), "clear_channel_schema: channel reverts to free-form after clear");
+
+  // cleared channel no longer appears in list
+  const lcs2 = await call(a, "list_channel_schemas", {});
+  assert(!lcs2.split("\n").some(l => l.startsWith(ssch + "\t")), "list_channel_schemas: cleared channel no longer listed");
+
+  // register_channel_schema — non-JSON input → isError
+  const badJsonRes = await a.callTool({ name: "register_channel_schema", arguments: { channel: ssch, schema: "not { valid json", strict: false } });
+  assert(badJsonRes.isError === true,                          "register_channel_schema: non-JSON input → isError");
+  assert(/not valid JSON/.test(badJsonRes.content[0].text),   "register_channel_schema: non-JSON error message");
+
+  // register_channel_schema — valid JSON but non-compiling schema → isError
+  const badSchemaRes = await a.callTool({ name: "register_channel_schema", arguments: { channel: ssch, schema: JSON.stringify({ properties: { x: { multipleOf: -1 } } }), strict: false } });
+  assert(badSchemaRes.isError === true,                          "register_channel_schema: non-compiling schema → isError");
+  assert(/does not compile/.test(badSchemaRes.content[0].text), "register_channel_schema: non-compiling error message");
+
+  // cleanup second schema channel
+  await call(a, "clear_channel_schema", { channel: ssch2 });
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
-  for (const c of [ch, wch, dch, pch, gch, wsch, toch, crch, crch2, hmch, rlch, msch]) {
+  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   await ta.close();

@@ -9,28 +9,41 @@
       "enum": ["status", "result", "question", "note", "contract-change", "handoff"]
     },
     "task_id": { "type": "string", "minLength": 3 },
-    "from": { "enum": ["backend", "frontend", "customer-portal"] },
-    "to": { "enum": ["orchestrator", "backend", "frontend", "customer-portal"] },
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Worker identifier, e.g. 'backend', 'frontend', 'platform-orch', 'qa'."
+    },
+    "to": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Recipient identifier. 'root-orchestrator', a domain orchestrator ('platform-orch', 'consumer-orch', 'growth-orch', 'intel-orch'), a worker name, or '*' for broadcast."
+    },
     "subject": { "type": "string", "minLength": 3 },
+    "summary": {
+      "type": "string",
+      "description": "Required on type:result. Format: 'PASS — <≤30-word sentence>' / 'FAIL — …' / 'SKIP — …'. Used by check_result and orchestrator ledger closes."
+    },
     "body": {},
     "refs": { "type": "array" }
   },
   "allOf": [
     {
-      "if": {
+      "if": { "properties": { "type": { "const": "result" } }, "required": ["type"] },
+      "then": {
+        "required": ["summary"],
         "properties": {
-          "type": { "const": "result" },
           "body": {
             "type": "object",
-            "properties": { "production_touching": { "const": true } },
-            "required": ["production_touching"]
+            "required": ["consent_basis"],
+            "properties": {
+              "consent_basis": {
+                "type": "string",
+                "description": "How consent was obtained. Use 'orchestrator-dispatch-only' for non-production tasks.",
+                "examples": ["orchestrator-dispatch-only", "terminal-human", "approval-token:#<msg_id>", "sprint-envelope-with-token:#<msg_id>"]
+              }
+            }
           }
-        },
-        "required": ["type", "body"]
-      },
-      "then": {
-        "properties": {
-          "body": { "required": ["consent_basis"] }
         }
       }
     }

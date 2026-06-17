@@ -1,8 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import "dotenv/config";
 
-const BROKER_URL = process.env.BROKER_URL || "http://localhost:8765/mcp";
-const SECRET = process.env.SHARED_SECRET || "test123";
+const BROKER_URL = process.env.BROKER_URL || "http://localhost:8080/mcp";
+const SECRET = process.env.SHARED_SECRET || "";
 
 async function connect(name) {
   const transport = new StreamableHTTPClientTransport(new URL(BROKER_URL), {

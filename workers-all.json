@@ -32,5 +32,9 @@
   { "name": "platform-orch",    "ns": "dv", "args": ["orchestrators/platform", "--inbox-channel", "dv-platform-orch"] },
   { "name": "consumer-orch",    "ns": "dv", "args": ["orchestrators/consumer", "--inbox-channel", "dv-consumer-orch"] },
   { "name": "growth-orch",      "ns": "dv", "args": ["orchestrators/growth",   "--inbox-channel", "dv-growth-orch"] },
-  { "name": "intel-orch",       "ns": "dv", "args": ["orchestrators/intel",    "--inbox-channel", "dv-intel-orch"] }
+  { "name": "intel-orch",       "ns": "dv", "args": ["orchestrators/intel",    "--inbox-channel", "dv-intel-orch"] },
+
+  { "name": "core",        "ns": "cb", "args": ["workers/core",        "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-core"] },
+  { "name": "protocol-qa", "ns": "cb", "args": ["workers/protocol-qa", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-protocol-qa"] },
+  { "name": "infra-orch",  "ns": "cb", "args": ["orchestrators/infra", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-orchestrator"] }
 ]

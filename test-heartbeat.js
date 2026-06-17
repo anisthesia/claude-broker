@@ -79,28 +79,28 @@ async function main() {
     name: "send_message",
     arguments: { channel: CH, sender: "backend", content: makeHeartbeat({ from: "backend", size: 45000, taskId: "feat-2026-05-28-foo-01", usd: 12.3 }) },
   });
-  expect(/Sent message/.test(r.content[0].text) && !/WARN/.test(r.content[0].text), "valid heartbeat passes strict", r.content[0].text);
+  expect(/Sent #/.test(r.content[0].text) && !/WARN/.test(r.content[0].text), "valid heartbeat passes strict", r.content[0].text);
 
   console.log("\n[step 2] frontend heartbeat — rotation recommended");
   r = await client.callTool({
     name: "send_message",
     arguments: { channel: CH, sender: "frontend", content: makeHeartbeat({ from: "frontend", size: 165000, taskId: "feat-2026-05-28-foo-02", usd: 8.7 }) },
   });
-  expect(/Sent message/.test(r.content[0].text) && !/WARN/.test(r.content[0].text), "rotation-flag heartbeat passes", r.content[0].text);
+  expect(/Sent #/.test(r.content[0].text) && !/WARN/.test(r.content[0].text), "rotation-flag heartbeat passes", r.content[0].text);
 
   console.log("\n[step 3] customer-portal heartbeat — idle-polling");
   r = await client.callTool({
     name: "send_message",
     arguments: { channel: CH, sender: "customer-portal", content: makeHeartbeat({ from: "customer-portal", size: 30000, state: "idle-polling", usd: 3.4 }) },
   });
-  expect(/Sent message/.test(r.content[0].text), "idle-polling heartbeat passes", r.content[0].text);
+  expect(/Sent #/.test(r.content[0].text), "idle-polling heartbeat passes", r.content[0].text);
 
   console.log("\n[step 4] backend heartbeat — second one, higher context (latest should win)");
   r = await client.callTool({
     name: "send_message",
     arguments: { channel: CH, sender: "backend", content: makeHeartbeat({ from: "backend", size: 90000, taskId: "feat-2026-05-28-foo-01", usd: 18.9 }) },
   });
-  expect(/Sent message/.test(r.content[0].text), "second backend heartbeat passes", r.content[0].text);
+  expect(/Sent #/.test(r.content[0].text), "second backend heartbeat passes", r.content[0].text);
 
   console.log("\n[step 5] malformed heartbeat (missing required 'context.rotation_recommended') — should reject under strict");
   const broken = JSON.stringify({

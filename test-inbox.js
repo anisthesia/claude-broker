@@ -190,6 +190,155 @@ async function run() {
     assert(body.count === 0, "count=0 for future cursor");
   }
 
+  // ── 10. POST /inbox/batch ─────────────────────────────────────────────────
+  console.log("\n10. POST /inbox/batch");
+  {
+    const bch1 = `test-batch-1-${ts}`;
+    const bch2 = `test-batch-2-${ts}`;
+    await send(client, bch1, { type: "task", v: 1 });
+    await send(client, bch1, { type: "task", v: 2 });
+    await send(client, bch2, { type: "note", v: 1 });
+
+    const r = await fetch(`${BROKER_BASE}/inbox/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [bch1]: 0, [bch2]: 0, "nonexistent-batch-ch": 0 }),
+    });
+    assert(r.status === 200, "POST /inbox/batch → HTTP 200");
+    const body = await r.json();
+    assert(body[bch1]?.pending === true,  "batch: bch1 pending=true");
+    assert(body[bch1]?.count === 2,       `batch: bch1 count=2 (got ${body[bch1]?.count})`);
+    assert(body[bch2]?.pending === true,  "batch: bch2 pending=true");
+    assert(body["nonexistent-batch-ch"]?.pending === false, "batch: empty channel → pending=false");
+
+    // Cursor catches up
+    const maxId1 = body[bch1].max_id;
+    const r2 = await fetch(`${BROKER_BASE}/inbox/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [bch1]: maxId1 }),
+    });
+    const b2 = await r2.json();
+    assert(b2[bch1]?.pending === false, "batch: caught-up cursor → pending=false");
+
+    // Array body → 400
+    const r3 = await fetch(`${BROKER_BASE}/inbox/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([1, 2, 3]),
+    });
+    assert(r3.status === 400, "batch: array body → HTTP 400");
+
+    await mcpCall(client, "purge_channel", { channel: bch1 });
+    await mcpCall(client, "purge_channel", { channel: bch2 });
+  }
+
+  // ── 11. POST /messages ────────────────────────────────────────────────────
+  console.log("\n11. POST /messages");
+  {
+    const rch = `test-rest-msg-${ts}`;
+    const authHdr = SECRET ? { Authorization: `Bearer ${SECRET}` } : {};
+
+    const r = await fetch(`${BROKER_BASE}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHdr },
+      body: JSON.stringify({ channel: rch, sender: "rest-client", content: "hello via REST" }),
+    });
+    assert(r.status === 200, "POST /messages → HTTP 200");
+    const body = await r.json();
+    assert(typeof body.id === "number" && body.id > 0, `POST /messages: id=${body.id} in response`);
+    assert(body.channel === rch,          "POST /messages: channel echoed");
+    assert(body.sender === "rest-client", "POST /messages: sender echoed");
+
+    // Message visible via /inbox
+    const { body: ib } = await inbox(rch, 0);
+    assert(ib.pending === true, "POST /messages: message visible via /inbox");
+    assert(ib.count === 1,      "POST /messages: count=1");
+
+    // Object content is accepted (auto-stringified)
+    const r2 = await fetch(`${BROKER_BASE}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHdr },
+      body: JSON.stringify({ channel: rch, sender: "rest-client", content: { type: "task", v: 99 } }),
+    });
+    const b2 = await r2.json();
+    assert(typeof b2.id === "number", "POST /messages: object content accepted");
+
+    // Missing fields → 400
+    const r3 = await fetch(`${BROKER_BASE}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHdr },
+      body: JSON.stringify({ channel: rch }),
+    });
+    assert(r3.status === 400, "POST /messages: missing sender/content → HTTP 400");
+
+    await mcpCall(client, "purge_channel", { channel: rch });
+  }
+
+  // ── 12. GET /workers + REST worker error paths ────────────────────────────
+  console.log("\n12. GET /workers + REST worker error paths");
+  {
+    const authHdr = SECRET ? { Authorization: `Bearer ${SECRET}` } : {};
+
+    const r = await fetch(`${BROKER_BASE}/workers`, { headers: authHdr });
+    assert(r.status === 200, "GET /workers → HTTP 200");
+    const workers = await r.json();
+    assert(Array.isArray(workers),             "GET /workers: response is an array");
+    assert(workers.length > 0,                 `GET /workers: at least one worker defined (got ${workers.length})`);
+    assert(typeof workers[0].name === "string", "GET /workers: each entry has a name");
+    assert(typeof workers[0].running === "boolean", "GET /workers: each entry has running boolean");
+    assert("pid" in workers[0],                "GET /workers: each entry has pid field");
+
+    // Unknown worker → 404
+    const r2 = await fetch(`${BROKER_BASE}/workers/nonexistent-xyz/start`, { method: "POST", headers: authHdr });
+    assert(r2.status === 404, "POST /workers/:name/start — unknown name → 404");
+
+    // Stop a worker that is not running → 404
+    const notRunning = workers.find(w => !w.running);
+    if (notRunning) {
+      const r3 = await fetch(`${BROKER_BASE}/workers/${notRunning.name}/stop`, { method: "POST", headers: authHdr });
+      assert(r3.status === 404, `POST /workers/:name/stop — not running → 404`);
+
+      // Start it, then start again → 409 conflict
+      const rStart = await fetch(`${BROKER_BASE}/workers/${notRunning.name}/start`, { method: "POST", headers: authHdr });
+      if (rStart.status === 503) {
+        console.log("  - 409 conflict test skipped (WATCHDOG_BIN not configured)");
+      } else {
+        assert(rStart.status === 200, `POST /workers/${notRunning.name}/start → 200`);
+        const bStart = await rStart.json();
+        assert(typeof bStart.pid === "number", "POST /workers/:name/start: pid in response");
+
+        const r409 = await fetch(`${BROKER_BASE}/workers/${notRunning.name}/start`, { method: "POST", headers: authHdr });
+        assert(r409.status === 409, "POST /workers/:name/start — already running → 409");
+
+        // Clean up
+        await fetch(`${BROKER_BASE}/workers/${notRunning.name}/stop`, { method: "POST", headers: authHdr });
+      }
+    }
+  }
+
+  // ── 13. GET /cost ─────────────────────────────────────────────────────────
+  console.log("\n13. GET /cost");
+  {
+    const authHdr = SECRET ? { Authorization: `Bearer ${SECRET}` } : {};
+
+    const r = await fetch(`${BROKER_BASE}/cost`, { headers: authHdr });
+    assert(r.status === 200, "GET /cost → HTTP 200");
+    const body = await r.json();
+    assert(typeof body.total_usd === "number",  "GET /cost: total_usd is a number");
+    assert(typeof body.sessions  === "number",  "GET /cost: sessions is a number");
+    assert(typeof body.since     === "string",  "GET /cost: since is an ISO string");
+    assert(Array.isArray(body.by_worker),       "GET /cost: by_worker is an array");
+
+    // since= far future → empty result
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const r2 = await fetch(`${BROKER_BASE}/cost?since=${encodeURIComponent(future)}`, { headers: authHdr });
+    const b2 = await r2.json();
+    assert(b2.total_usd === 0,       "GET /cost?since=future: total_usd=0");
+    assert(b2.sessions  === 0,       "GET /cost?since=future: sessions=0");
+    assert(b2.by_worker.length === 0, "GET /cost?since=future: by_worker empty");
+  }
+
   await transport.close();
 
   console.log(`\n── ${passed} passed, ${failed} failed ──\n`);

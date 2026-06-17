@@ -73,7 +73,7 @@ async function main() {
     arguments: { channel: TEST_CHANNEL, sender: "orchestrator", content: malformedEnvelope },
   });
   expect(/WARN/.test(r.content[0].text), "malformed envelope: warning emitted in warn-only", r.content[0].text);
-  expect(/Sent message/.test(r.content[0].text), "malformed envelope: still stored (warn-only)", r.content[0].text);
+  expect(/Sent #/.test(r.content[0].text), "malformed envelope: still stored (warn-only)", r.content[0].text);
 
   console.log("\n[step 4] flip channel to STRICT mode, send same malformed envelope — should reject");
   r = await client.callTool({
@@ -93,7 +93,7 @@ async function main() {
     name: "send_message",
     arguments: { channel: TEST_CHANNEL, sender: "orchestrator", content: validEnvelope },
   });
-  expect(/Sent message/.test(r.content[0].text) && !/WARN/.test(r.content[0].text),
+  expect(/Sent #/.test(r.content[0].text) && !/WARN/.test(r.content[0].text),
     "valid envelope passes under strict", r.content[0].text);
 
   console.log("\n[step 6] non-JSON content under STRICT — should reject");
@@ -103,19 +103,19 @@ async function main() {
   });
   expect(/not valid JSON/.test(r.content[0].text), "non-JSON content rejected under strict", r.content[0].text);
 
-  console.log("\n[step 7] enum violation (to: 'Backend' capitalized) — should reject");
+  console.log("\n[step 7] enum violation (type: 'invalid-type') — should reject");
   const wrongCase = JSON.stringify({
-    type: "task",
+    type: "invalid-type",
     task_id: "smoke-2026-05-27-validator-02",
     from: "orchestrator",
-    to: "Backend",
-    subject: "wrong-case to",
+    to: "backend",
+    subject: "bad type enum value",
   });
   r = await client.callTool({
     name: "send_message",
     arguments: { channel: TEST_CHANNEL, sender: "orchestrator", content: wrongCase },
   });
-  expect(/schema validation failed/.test(r.content[0].text), "enum violation rejected (case-sensitive 'to')", r.content[0].text);
+  expect(/schema validation failed/.test(r.content[0].text), "enum violation rejected (invalid type value)", r.content[0].text);
 
   console.log("\n[cleanup] purge test channel + clear its schema");
   await client.callTool({ name: "purge_channel", arguments: { channel: TEST_CHANNEL } });

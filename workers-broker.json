@@ -1,0 +1,5 @@
+[
+  { "name": "core",        "ns": "cb", "args": ["workers/core",        "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-core"] },
+  { "name": "protocol-qa", "ns": "cb", "args": ["workers/protocol-qa", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-protocol-qa"] },
+  { "name": "infra-orch",  "ns": "cb", "args": ["orchestrators/infra", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-orchestrator"] }
+]
