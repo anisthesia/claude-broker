@@ -8,6 +8,7 @@
  *   Fix D: dv-status schema warns when type:result is missing 'summary'
  *   Fix E: dv-status schema warns when type:result body is missing 'consent_basis'
  *   Fix F: dv-worker-inbox schema accepts 'ui_verified_instructions' under strict mode
+ *   Fix G: dv-status schema warns when type:result has body.commits but omits affected_files
  *
  * Run:  node test-regression-fixes.js
  * Requires a running broker at BROKER_URL (default http://localhost:8080).
@@ -421,6 +422,76 @@ async function run() {
     });
     const resBad = await callRaw(a, "send_message", { channel: strictCh, sender: "orchestrator", content: taskBadField });
     assert(resBad.isError === true, "strict mode: task with unknown extra field is still rejected");
+  }
+
+  // Fix G: dv-status schema requires affected_files when body.commits is non-empty
+  //
+  // Before the fix: affected_files had no conditional requirement — a type:result
+  //                 with commits could omit it without a schema violation.
+  // After the fix:  an allOf if/then in dv-status.json makes affected_files required
+  //                 (minItems:1) whenever body.commits is present and non-empty.
+  //                 This ensures sprint_file_conflicts has data to detect conflicts.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  console.log("\nFix G. dv-status schema: affected_files required when body.commits is non-empty");
+  {
+    const statusCh = ch("status-affected-files");
+    const statusSchema = readFileSync("schemas/dv-status.json", "utf-8");
+
+    // Register dv-status schema in WARN mode (not strict) — matches production default.
+    await call(a, "register_channel_schema", { channel: statusCh, schema: statusSchema, strict: false });
+
+    // Case 1: result WITH commits but WITHOUT affected_files → should WARN
+    const resultNoFiles = JSON.stringify({
+      type: "result",
+      task_id: `g-no-files-${RUN}`,
+      from:    "backend",
+      to:      "orchestrator",
+      subject: "task done",
+      summary: "PASS — migration applied",
+      body: {
+        consent_basis: "orchestrator-dispatch-only",
+        commits: [{ sha: "abc1234", branch: "feat/deposit" }],
+      },
+    });
+    const resNoFiles = await callRaw(a, "send_message", { channel: statusCh, sender: "backend", content: resultNoFiles });
+    assert(resNoFiles.isError !== true,                              "Fix G: result with commits but no affected_files is not rejected (warn mode)");
+    assert(resNoFiles.content[0].text.includes("WARN"),             "Fix G: result with commits but no affected_files produces WARN");
+
+    // Case 2: result WITH commits AND affected_files → no warn
+    const resultWithFiles = JSON.stringify({
+      type: "result",
+      task_id: `g-with-files-${RUN}`,
+      from:    "backend",
+      to:      "orchestrator",
+      subject: "task done",
+      summary: "PASS — migration applied",
+      affected_files: ["backend/src/jobs/deposit-reconciliation.service.ts"],
+      body: {
+        consent_basis: "orchestrator-dispatch-only",
+        commits: [{ sha: "abc1234", branch: "feat/deposit" }],
+      },
+    });
+    const resWithFiles = await callRaw(a, "send_message", { channel: statusCh, sender: "backend", content: resultWithFiles });
+    assert(resWithFiles.isError !== true,                           "Fix G: result with commits and affected_files is accepted");
+    assert(!resWithFiles.content[0].text.includes("WARN"),         "Fix G: result with commits and affected_files produces no WARN");
+
+    // Case 3: result WITHOUT commits can omit affected_files (no warn)
+    const resultNoCommits = JSON.stringify({
+      type: "result",
+      task_id: `g-no-commits-${RUN}`,
+      from:    "backend",
+      to:      "orchestrator",
+      subject: "read-only task done",
+      summary: "PASS — baseline captured",
+      body: { consent_basis: "orchestrator-dispatch-only" },
+    });
+    const resNoCommits = await callRaw(a, "send_message", { channel: statusCh, sender: "backend", content: resultNoCommits });
+    assert(resNoCommits.isError !== true,                          "Fix G: result without commits can omit affected_files");
+    assert(!resNoCommits.content[0].text.includes("WARN"),         "Fix G: result without commits produces no WARN for missing affected_files");
+
+    await call(a, "clear_channel_schema", { channel: statusCh });
+    await call(a, "purge_channel",        { channel: statusCh });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

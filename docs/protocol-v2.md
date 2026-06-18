@@ -289,6 +289,122 @@ of warn-only burn-in before flipping strict.
 
 ---
 
+---
+
+## Spec 3 — Sprint-close conflict pre-flight
+
+### Motivation
+
+Real incident (2026-06-18, dogsvilla): `worker/bs` cherry-picked orphaned
+commits from `worker/backend`'s scope to obtain implementation code before
+writing tests. Those commits created `deposit-reconciliation.service.ts` in
+`worker/bs`. Later, `worker/backend` added a per-payment try/catch to the same
+file. Sprint-close merged `worker/backend` first (fine), then tried to merge
+`worker/bs` — add/add conflict. Manual resolution required:
+
+```bash
+git checkout --ours backend/src/jobs/deposit-reconciliation.service.ts
+git add ...
+GIT_EDITOR=true git merge --continue
+git push origin main          # ← required before re-run, or startup rebase fails
+./scripts/sprint-close-merge.sh ...  # re-run skips resolved workers
+```
+
+The conflict was detectable in advance: both workers had posted `type:result`
+messages with `affected_files` listing the same file. A pre-flight query
+would have caught it before the merge script ran.
+
+### New broker tool: `sprint_file_conflicts`
+
+Added to `server.js`. Accepts `status_channel` + optional `since_id`.
+
+Algorithm:
+1. Query all `type:result` messages (SKIP results excluded).
+2. Parse `affected_files` from each; group by file path → list of `{worker, task_id}`.
+3. Files with 2+ distinct workers → `conflicts` list (merge conflict risk).
+4. Workers that posted results without `affected_files` → `blind_spots` list.
+
+Returns:
+```json
+{
+  "conflicts": [
+    {
+      "file": "backend/src/jobs/deposit-reconciliation.service.ts",
+      "workers": ["backend", "bs"],
+      "touches": [
+        { "worker": "backend", "task_id": "add-payment-deposit-reconciliation-job-2026-06-18" },
+        { "worker": "bs",      "task_id": "add-tests-for-add-payment-deposit-reconciliation-job-2026-06-18" }
+      ]
+    }
+  ],
+  "clean_count": 14,
+  "blind_spots": ["frontend"],
+  "summary": "1 conflict(s) detected — resolve before running sprint-close"
+}
+```
+
+### Schema enforcement: `affected_files` required when commits non-empty
+
+`dv-status.json` updated with an `allOf` condition: when `type === "result"`
+AND `body.commits` is a non-empty array, `affected_files` is required.
+Broker runs in warn-only mode, so this produces a schema warning rather than
+a hard rejection, but it makes the expectation explicit and surfaced.
+
+### Worker protocol rule: cherry-pick declaration
+
+**When any worker cherry-picks commits that touch files outside its scope
+ownership table, it MUST:**
+
+1. Post a `type: note` to its cluster status channel immediately after the
+   cherry-pick, before continuing with the task:
+
+   ```json
+   {
+     "type": "note",
+     "task_id": "<current task_id>",
+     "from": "<worker>",
+     "to": "orchestrator",
+     "subject": "cherry-pick adoption: <short description>",
+     "body": {
+       "adopted_files": ["<list of files cherry-picked outside scope>"],
+       "source_branch": "worker/<other-worker>",
+       "reason": "<why the cherry-pick was necessary>",
+       "conflict_risk": "<low|medium|high> — <one sentence assessment>"
+     }
+   }
+   ```
+
+2. Include the cherry-picked files in its `affected_files` on the final
+   `type: result`, even though those files are outside its normal scope
+   ownership table.
+
+**Why this matters:** cherry-picks from another worker's scope create
+add/add conflicts at sprint-close if the source worker subsequently modifies
+the same file. The declaration gives the orchestrator visibility to run
+`sprint_file_conflicts` and pre-resolve before the merge script runs.
+
+**Rule of thumb:** if you are cherry-picking to "bootstrap" implementation
+code before writing tests, that is a scope ownership signal — either the
+task should have been dispatched to the owning worker first (with
+`depends_on`), or the test task should be `depends_on` the implementation
+result and run only after it is committed on the owner's branch.
+
+### Orchestrator sprint-close checklist addition
+
+Before calling `scripts/sprint-close-merge.sh`, add this step:
+
+```
+3a. Call sprint_file_conflicts(status_channel="dv-status").
+    - If conflicts = []: proceed.
+    - If conflicts non-empty: for each conflict, inspect which version to
+      keep, update the lower-priority worker's branch to match (or note the
+      conflict for manual --ours resolution during the merge), then proceed.
+    - If blind_spots non-empty: warn; those workers may have undetected
+      conflicts. Check their affected files manually via git diff.
+```
+
+---
+
 ## What this pair gives you, together
 
 - **Orchestrator stops reconstructing system state from message archaeology**

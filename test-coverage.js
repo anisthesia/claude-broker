@@ -19,6 +19,22 @@
  * 15. has_messages cursor correctness (since_id excludes messages at or below cursor)
  * 16. filter_sender comma-separated multi-sender
  * 17. read_messages with limit parameter respected
+ * 18. sprint_file_conflicts: empty channel → no conflicts
+ * 19. sprint_file_conflicts: single worker → no conflicts, all clean
+ * 20. sprint_file_conflicts: two workers touch same file → conflict detected
+ * 21. sprint_file_conflicts: SKIP results excluded from conflict detection
+ * 22. sprint_file_conflicts: since_id cursor filters correctly
+ * 23. sprint_file_conflicts: missing affected_files → blind spot reported
+ * 24. sprint_file_conflicts: multiple conflicts across workers
+ * 25. sprint_file_conflicts: one worker posts two results — touches accumulate across messages
+ * 26. upsert_heartbeat: keep-latest per sender + get_latest_per_sender
+ * 27. get_channel_schema: returns correct schema content after registration
+ * 28. list_channel_schemas: reflects register + clear lifecycle
+ * 29. capability lifecycle: register_capability / list_capabilities / deregister_capability
+ * 30. purge_channel older_than_ms: partial prune (keeps recent, deletes old)
+ * 31. post_gated_message: success path (deps pre-satisfied + deps satisfied via wait)
+ * 32. sprint_summary with control_channel: includes sprint boundary note
+ * 33. send_message_batch: strict schema rejects entire batch atomically
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -522,6 +538,783 @@ async function run() {
     assert(!r3.includes('"v":9'), "read_messages limit=3: last message (v=9) excluded");
 
     await call(a, "purge_channel", { channel: limCh });
+  }
+
+  // ── 18. sprint_file_conflicts: empty channel → no conflicts ──────────────────
+
+  console.log("\n18. sprint_file_conflicts: empty channel → no conflicts");
+  {
+    const sfcCh = ch("sfc-empty");
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(Array.isArray(res.conflicts),         "sfc empty: conflicts is array");
+    assert(res.conflicts.length === 0,           "sfc empty: no conflicts");
+    assert(res.clean_count === 0,                `sfc empty: clean_count=0 (got ${res.clean_count})`);
+    assert(Array.isArray(res.blind_spots),       "sfc empty: blind_spots is array");
+    assert(res.blind_spots.length === 0,         "sfc empty: no blind spots");
+    assert(typeof res.summary === "string",      "sfc empty: summary is a string");
+    assert(/no conflict|safe to run/i.test(res.summary), `sfc empty: summary indicates no conflicts (got: ${res.summary})`);
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 19. sprint_file_conflicts: single worker → no conflicts, all clean ────────
+
+  console.log("\n19. sprint_file_conflicts: single worker → no conflicts, all clean");
+  {
+    const sfcCh = ch("sfc-single");
+
+    // backend touches two distinct files
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-single-t1-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "add deposit job",
+        summary: "PASS — done",
+        affected_files: [
+          "backend/src/jobs/deposit-reconciliation.service.ts",
+          "backend/src/jobs/deposit-reconciliation.module.ts",
+        ],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 0,  "sfc single: no conflicts (single owner)");
+    assert(res.clean_count === 2,       `sfc single: clean_count=2 (got ${res.clean_count})`);
+    assert(res.blind_spots.length === 0,"sfc single: no blind spots");
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 20. sprint_file_conflicts: two workers touch same file → conflict ─────────
+
+  console.log("\n20. sprint_file_conflicts: two workers touch same file → conflict detected");
+  {
+    const sfcCh = ch("sfc-conflict");
+    const sharedFile = "backend/src/jobs/deposit-reconciliation.service.ts";
+
+    // backend posts result first
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-conflict-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "add deposit job with try/catch",
+        summary: "PASS — done",
+        affected_files: [sharedFile],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // bs cherry-picked and also reports the same file
+    await call(a, "send_message", { channel: sfcCh, sender: "bs",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-conflict-bs-${RUN}`,
+        from: "bs", to: "orchestrator",
+        subject: "add tests for deposit job",
+        summary: "PASS — done",
+        affected_files: [sharedFile, "backend/src/jobs/deposit-reconciliation.service.spec.ts"],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 1,                       "sfc conflict: 1 conflict detected");
+    assert(res.conflicts[0].file === sharedFile,             `sfc conflict: correct file (got ${res.conflicts[0]?.file})`);
+
+    const conflictWorkers = res.conflicts[0]?.workers ?? [];
+    assert(conflictWorkers.includes("backend"),              "sfc conflict: backend in conflict workers");
+    assert(conflictWorkers.includes("bs"),                   "sfc conflict: bs in conflict workers");
+    assert(conflictWorkers.length === 2,                     `sfc conflict: exactly 2 workers (got ${conflictWorkers.length})`);
+
+    // The spec file is only in bs → clean
+    assert(res.clean_count === 1,                            `sfc conflict: clean_count=1 for spec file (got ${res.clean_count})`);
+
+    // touches array has one entry per worker per task
+    const touches = res.conflicts[0]?.touches ?? [];
+    assert(touches.length === 2,                             `sfc conflict: 2 touch entries (got ${touches.length})`);
+    assert(touches.some(t => t.worker === "backend"),        "sfc conflict: touch entry for backend");
+    assert(touches.some(t => t.worker === "bs"),             "sfc conflict: touch entry for bs");
+
+    assert(/1 conflict/i.test(res.summary),                  `sfc conflict: summary mentions 1 conflict (got: ${res.summary})`);
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 21. sprint_file_conflicts: SKIP results excluded ─────────────────────────
+
+  console.log("\n21. sprint_file_conflicts: SKIP results excluded from conflict detection");
+  {
+    const sfcCh = ch("sfc-skip");
+    const sharedFile = "backend/src/services/some.service.ts";
+
+    // backend: real result touching sharedFile
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-skip-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "implement some service",
+        summary: "PASS — done",
+        affected_files: [sharedFile],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // frontend: SKIP result referencing the same file — must NOT count
+    await call(a, "send_message", { channel: sfcCh, sender: "frontend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-skip-frontend-${RUN}`,
+        from: "frontend", to: "orchestrator",
+        subject: "skip — out of scope",
+        summary: "SKIP — not applicable to frontend",
+        affected_files: [sharedFile],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 0,  "sfc skip: no conflict (SKIP result excluded)");
+    assert(res.clean_count === 1,       `sfc skip: clean_count=1 for backend's file (got ${res.clean_count})`);
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 22. sprint_file_conflicts: since_id cursor filters correctly ──────────────
+
+  console.log("\n22. sprint_file_conflicts: since_id cursor filters correctly");
+  {
+    const sfcCh = ch("sfc-cursor");
+    const sharedFile = "backend/src/jobs/old-job.service.ts";
+
+    // Pre-sprint result from a previous sprint (both workers touching same file)
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-cursor-old-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "old sprint task",
+        summary: "PASS — done",
+        affected_files: [sharedFile],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+    await call(a, "send_message", { channel: sfcCh, sender: "bs",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-cursor-old-bs-${RUN}`,
+        from: "bs", to: "orchestrator",
+        subject: "old sprint test task",
+        summary: "PASS — done",
+        affected_files: [sharedFile],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // Capture cursor after old results
+    const hmRaw = await call(a, "has_messages", { channel: sfcCh, since_id: 0 });
+    const cursor = JSON.parse(hmRaw).max_id;
+
+    // New sprint: only backend touches a NEW file
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-cursor-new-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "new sprint task",
+        summary: "PASS — done",
+        affected_files: ["backend/src/jobs/new-job.service.ts"],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // Without cursor: old conflict shows up
+    const rawAll = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const resAll = JSON.parse(rawAll);
+    assert(resAll.conflicts.length === 1,  "sfc cursor: without since_id old conflict visible");
+
+    // With cursor: only new-sprint results → no conflict
+    const rawNew = await call(a, "sprint_file_conflicts", { status_channel: sfcCh, since_id: cursor });
+    const resNew = JSON.parse(rawNew);
+    assert(resNew.conflicts.length === 0,  "sfc cursor: with since_id old conflict excluded");
+    assert(resNew.clean_count === 1,       `sfc cursor: clean_count=1 for new file (got ${resNew.clean_count})`);
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 23. sprint_file_conflicts: missing affected_files → blind spot ────────────
+
+  console.log("\n23. sprint_file_conflicts: missing affected_files → blind spot reported");
+  {
+    const sfcCh = ch("sfc-blind");
+
+    // backend: result with affected_files → clean
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-blind-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "task with files",
+        summary: "PASS — done",
+        affected_files: ["backend/src/some.ts"],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // frontend: result without affected_files → blind spot
+    await call(a, "send_message", { channel: sfcCh, sender: "frontend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-blind-frontend-${RUN}`,
+        from: "frontend", to: "orchestrator",
+        subject: "task missing files",
+        summary: "PASS — done",
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // bs: result with empty affected_files array → also a blind spot
+    await call(a, "send_message", { channel: sfcCh, sender: "bs",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-blind-bs-${RUN}`,
+        from: "bs", to: "orchestrator",
+        subject: "task with empty files",
+        summary: "PASS — done",
+        affected_files: [],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 0,          "sfc blind: no false conflicts");
+    assert(res.clean_count === 1,               `sfc blind: clean_count=1 for backend file (got ${res.clean_count})`);
+    assert(res.blind_spots.includes("frontend"),"sfc blind: frontend in blind_spots (no affected_files)");
+    assert(res.blind_spots.includes("bs"),      "sfc blind: bs in blind_spots (empty affected_files)");
+    assert(!res.blind_spots.includes("backend"),"sfc blind: backend NOT in blind_spots");
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 24. sprint_file_conflicts: multiple conflicts across workers ───────────────
+
+  console.log("\n24. sprint_file_conflicts: multiple conflicts across multiple workers");
+  {
+    const sfcCh = ch("sfc-multi");
+    const fileA = "backend/src/jobs/reconciliation.service.ts";
+    const fileB = "backend/src/modules/payments/payments.service.ts";
+    const fileC = "backend/src/modules/payments/payments.module.ts"; // only frontend
+
+    // backend: touches fileA + fileB
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-multi-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "backend multi task",
+        summary: "PASS — done",
+        affected_files: [fileA, fileB],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // bs: touches fileA (conflict with backend)
+    await call(a, "send_message", { channel: sfcCh, sender: "bs",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-multi-bs-${RUN}`,
+        from: "bs", to: "orchestrator",
+        subject: "bs multi task",
+        summary: "PASS — done",
+        affected_files: [fileA],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // frontend: touches fileB (conflict with backend) + fileC (clean)
+    await call(a, "send_message", { channel: sfcCh, sender: "frontend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-multi-frontend-${RUN}`,
+        from: "frontend", to: "orchestrator",
+        subject: "frontend multi task",
+        summary: "PASS — done",
+        affected_files: [fileB, fileC],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 2, `sfc multi: 2 conflicts (got ${res.conflicts.length})`);
+
+    const conflictFiles = res.conflicts.map(c => c.file);
+    assert(conflictFiles.includes(fileA), "sfc multi: fileA in conflicts (backend ∩ bs)");
+    assert(conflictFiles.includes(fileB), "sfc multi: fileB in conflicts (backend ∩ frontend)");
+    assert(!conflictFiles.includes(fileC),"sfc multi: fileC not in conflicts (frontend only)");
+
+    // fileC is the only clean file
+    assert(res.clean_count === 1, `sfc multi: clean_count=1 for fileC (got ${res.clean_count})`);
+    assert(res.blind_spots.length === 0, "sfc multi: no blind spots");
+    assert(/2 conflict/i.test(res.summary), `sfc multi: summary mentions 2 conflicts (got: ${res.summary})`);
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 25. sprint_file_conflicts: one worker posts two results ───────────────────
+  // Tests that touches accumulate correctly across multiple result messages from
+  // the same worker, so a worker whose scope spans two tasks (two result posts)
+  // still produces the correct conflict entries for each file.
+
+  console.log("\n25. sprint_file_conflicts: one worker posts two results — touches accumulate");
+  {
+    const sfcCh = ch("sfc-two-results");
+    const fileA = "backend/src/jobs/job-a.service.ts";
+    const fileB = "backend/src/jobs/job-b.service.ts";
+
+    // backend posts two separate results from two different tasks
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-two-r1-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "task 1 — job-a",
+        summary: "PASS — done",
+        affected_files: [fileA],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+    await call(a, "send_message", { channel: sfcCh, sender: "backend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-two-r2-backend-${RUN}`,
+        from: "backend", to: "orchestrator",
+        subject: "task 2 — job-b",
+        summary: "PASS — done",
+        affected_files: [fileB],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // bs conflicts with backend on fileA only
+    await call(a, "send_message", { channel: sfcCh, sender: "bs",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-two-r-bs-${RUN}`,
+        from: "bs", to: "orchestrator",
+        subject: "test task — job-a tests",
+        summary: "PASS — done",
+        affected_files: [fileA],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    // frontend conflicts with backend on fileB only
+    await call(a, "send_message", { channel: sfcCh, sender: "frontend",
+      content: JSON.stringify({
+        type: "result", task_id: `sfc-two-r-frontend-${RUN}`,
+        from: "frontend", to: "orchestrator",
+        subject: "ui task touching job-b",
+        summary: "PASS — done",
+        affected_files: [fileB],
+        body: { consent_basis: "orchestrator-dispatch-only" },
+      }),
+    });
+
+    const raw = await call(a, "sprint_file_conflicts", { status_channel: sfcCh });
+    const res = JSON.parse(raw);
+
+    assert(res.conflicts.length === 2, `sfc two-results: 2 conflicts (got ${res.conflicts.length})`);
+
+    const conflictFiles = res.conflicts.map(c => c.file);
+    assert(conflictFiles.includes(fileA), "sfc two-results: fileA in conflicts (backend task-1 ∩ bs)");
+    assert(conflictFiles.includes(fileB), "sfc two-results: fileB in conflicts (backend task-2 ∩ frontend)");
+
+    // fileA conflict: backend + bs; touches must reference the correct task_id
+    const cA = res.conflicts.find(c => c.file === fileA);
+    assert(cA.workers.includes("backend"),   "sfc two-results: fileA conflict includes backend");
+    assert(cA.workers.includes("bs"),        "sfc two-results: fileA conflict includes bs");
+    assert(cA.workers.length === 2,          `sfc two-results: fileA exactly 2 workers (got ${cA.workers.length})`);
+    assert(cA.touches.some(t => t.worker === "backend" && t.task_id.includes("r1")),
+      "sfc two-results: fileA touch references backend task-1 (r1)");
+
+    // fileB conflict: backend + frontend; touch references backend's second task
+    const cB = res.conflicts.find(c => c.file === fileB);
+    assert(cB.workers.includes("backend"),   "sfc two-results: fileB conflict includes backend");
+    assert(cB.workers.includes("frontend"),  "sfc two-results: fileB conflict includes frontend");
+    assert(cB.touches.some(t => t.worker === "backend" && t.task_id.includes("r2")),
+      "sfc two-results: fileB touch references backend task-2 (r2)");
+
+    assert(res.clean_count === 0,          `sfc two-results: clean_count=0 (all files conflicted) (got ${res.clean_count})`);
+    assert(res.blind_spots.length === 0,   "sfc two-results: no blind spots");
+
+    await call(a, "purge_channel", { channel: sfcCh });
+  }
+
+  // ── 26. upsert_heartbeat + get_latest_per_sender ─────────────────────────────
+
+  console.log("\n26. upsert_heartbeat: keep-latest per sender + get_latest_per_sender");
+  {
+    const telCh = ch("telemetry");
+
+    // Worker A sends 3 heartbeats — only the latest must survive per sender
+    await call(a, "upsert_heartbeat", { channel: telCh, sender: "backend",
+      content: JSON.stringify({ context: { tier_threshold_pct: 45.0 }, state: "working" }) });
+    await call(a, "upsert_heartbeat", { channel: telCh, sender: "backend",
+      content: JSON.stringify({ context: { tier_threshold_pct: 62.5 }, state: "working" }) });
+    await call(a, "upsert_heartbeat", { channel: telCh, sender: "backend",
+      content: JSON.stringify({ context: { tier_threshold_pct: 78.3 }, state: "working" }) });
+
+    // Worker B sends 1 heartbeat (different sender — must also survive)
+    await call(a, "upsert_heartbeat", { channel: telCh, sender: "frontend",
+      content: JSON.stringify({ context: { tier_threshold_pct: 31.0 }, state: "idle-polling" }) });
+
+    // Channel must have exactly 2 messages (one per sender — stale backend ones deleted)
+    const allRaw  = await call(a, "read_messages", { channel: telCh, since_id: 0 });
+    const allLines = allRaw.trim().split("\n").filter(l => /^\[#\d+\]/.test(l));
+    assert(allLines.length === 2,
+      `upsert: channel has exactly 2 messages (one per sender) (got ${allLines.length})`);
+
+    // get_latest_per_sender returns one row per sender
+    const latestRaw   = await call(a, "get_latest_per_sender", { channel: telCh });
+    const latestLines = latestRaw.trim().split("\n").filter(l => /^\[#\d+\]/.test(l));
+    assert(latestLines.length === 2,
+      `upsert: get_latest_per_sender returns 2 rows (got ${latestLines.length})`);
+
+    // Parse each row
+    let backendHb = null, frontendHb = null;
+    for (const line of latestLines) {
+      const m = line.match(/^\[#(\d+)\] \S+ <([^>]+)>: (.*)/);
+      if (!m) continue;
+      const [, , sender, content] = m;
+      const hb = JSON.parse(content);
+      if (sender === "backend")  backendHb  = hb;
+      if (sender === "frontend") frontendHb = hb;
+    }
+    assert(backendHb  !== null, "upsert: backend row present in get_latest_per_sender");
+    assert(frontendHb !== null, "upsert: frontend row present in get_latest_per_sender");
+
+    // Backend: must reflect the LATEST heartbeat (78.3), not the stale ones
+    assert(backendHb.context.tier_threshold_pct === 78.3,
+      `upsert: backend latest tier_threshold_pct=78.3 (not stale) (got ${backendHb?.context?.tier_threshold_pct})`);
+    assert(!latestRaw.includes('"tier_threshold_pct":62.5'),
+      "upsert: stale backend heartbeat (62.5) deleted");
+    assert(!latestRaw.includes('"tier_threshold_pct":45'),
+      "upsert: stale backend heartbeat (45.0) deleted");
+
+    // Frontend: correct value
+    assert(frontendHb.context.tier_threshold_pct === 31.0,
+      `upsert: frontend tier_threshold_pct=31.0 (got ${frontendHb?.context?.tier_threshold_pct})`);
+
+    await call(a, "purge_channel", { channel: telCh });
+  }
+
+  // ── 27. get_channel_schema ─────────────────────────────────────────────────────
+
+  console.log("\n27. get_channel_schema: returns schema content after registration");
+  {
+    const gsCh = ch("get-schema");
+    const schema = JSON.stringify({
+      type: "object",
+      required: ["type", "event_id"],
+      properties: {
+        type:     { type: "string" },
+        event_id: { type: "string" },
+      },
+    });
+
+    // No schema registered → free-form message
+    const r0 = await call(a, "get_channel_schema", { channel: gsCh });
+    assert(r0.includes("free-form") || r0.includes("No schema"),
+      `get_channel_schema: free-form before registration (got: ${r0})`);
+
+    // Register warn-only
+    await call(a, "register_channel_schema", { channel: gsCh, schema, strict: false });
+    const r1 = await call(a, "get_channel_schema", { channel: gsCh });
+    assert(r1.includes(gsCh),           "get_channel_schema: response includes channel name");
+    assert(r1.includes("warn-only") || r1.includes("off"),
+      "get_channel_schema: strict=off reported (warn-only)");
+    assert(r1.includes("event_id"),     "get_channel_schema: schema JSON includes required field");
+    assert(r1.includes('"required"'),   "get_channel_schema: schema JSON has required array");
+
+    // Flip to strict — strict=on must be reported
+    await call(a, "register_channel_schema", { channel: gsCh, schema, strict: true });
+    const r2 = await call(a, "get_channel_schema", { channel: gsCh });
+    assert(r2.includes("Strict: on") || r2.includes("strict=on"),
+      `get_channel_schema: strict=on reported after update (got: ${r2.slice(0, 100)})`);
+
+    await call(a, "clear_channel_schema", { channel: gsCh });
+  }
+
+  // ── 28. list_channel_schemas ───────────────────────────────────────────────────
+
+  console.log("\n28. list_channel_schemas: reflects register + clear lifecycle");
+  {
+    const chA = ch("lcs-a");
+    const chB = ch("lcs-b");
+    const schema = JSON.stringify({ type: "object" });
+
+    await call(a, "register_channel_schema", { channel: chA, schema, strict: false });
+    await call(a, "register_channel_schema", { channel: chB, schema, strict: true  });
+
+    const r1 = await call(a, "list_channel_schemas", {});
+    assert(r1.includes(chA),         `list_channel_schemas: channel A present`);
+    assert(r1.includes(chB),          "list_channel_schemas: channel B present");
+    assert(r1.includes("strict=off"), "list_channel_schemas: channel A shows strict=off");
+    assert(r1.includes("strict=on"),  "list_channel_schemas: channel B shows strict=on");
+
+    // Clear channel A → must disappear from list
+    await call(a, "clear_channel_schema", { channel: chA });
+    const r2 = await call(a, "list_channel_schemas", {});
+    assert(!r2.includes(chA), "list_channel_schemas: channel A gone after clear");
+    assert(r2.includes(chB),  "list_channel_schemas: channel B still present");
+
+    await call(a, "clear_channel_schema", { channel: chB });
+  }
+
+  // ── 29. Capability lifecycle ───────────────────────────────────────────────────
+
+  console.log("\n29. Capability lifecycle: register / list / deregister");
+  {
+    const workerFE = `cap-fe-${RUN}`;
+    const workerBE = `cap-be-${RUN}`;
+
+    // Register
+    const r1 = await call(a, "register_capability", {
+      worker:   workerFE,
+      owns:     ["UI", "checkout-flow"],
+      channels: ["dv-frontend", "dv-status"],
+    });
+    assert(r1.includes("Registered"), `register_capability: confirmation returned (got: ${r1})`);
+    assert(r1.includes(workerFE),     "register_capability: worker name in response");
+
+    await call(a, "register_capability", {
+      worker:   workerBE,
+      owns:     ["payments", "DB migrations", "rate-limits"],
+      channels: ["dv-backend", "dv-status"],
+    });
+
+    // list_capabilities shows both entries with owns
+    const r2 = await call(a, "list_capabilities", {});
+    assert(r2.includes(workerFE),       "list_capabilities: frontend worker present");
+    assert(r2.includes(workerBE),       "list_capabilities: backend worker present");
+    assert(r2.includes("checkout-flow"), "list_capabilities: frontend owns visible");
+    assert(r2.includes("DB migrations"),"list_capabilities: backend owns visible");
+
+    // Deregister frontend
+    const r3 = await call(a, "deregister_capability", { worker: workerFE });
+    assert(r3.includes("Deregistered") || r3.includes(workerFE),
+      `deregister_capability: confirmation returned (got: ${r3})`);
+
+    const r4 = await call(a, "list_capabilities", {});
+    assert(!r4.includes(workerFE), "list_capabilities: frontend removed after deregister");
+    assert(r4.includes(workerBE),  "list_capabilities: backend still registered");
+
+    // Deregister non-existent → graceful, NOT isError
+    const r5 = await callRaw(a, "deregister_capability", { worker: `cap-none-${RUN}` });
+    assert(!r5.isError,
+      "deregister_capability: non-existent worker is graceful (not isError)");
+    assert(r5.content[0].text.includes("No capability entry") || r5.content[0].text.includes("not found"),
+      `deregister_capability: non-existent returns informative message (got: ${r5.content[0].text})`);
+
+    await call(a, "deregister_capability", { worker: workerBE });
+  }
+
+  // ── 30. purge_channel older_than_ms ───────────────────────────────────────────
+
+  console.log("\n30. purge_channel: older_than_ms partial prune");
+  {
+    const pCh = ch("partial-purge");
+
+    await call(a, "send_message", { channel: pCh, sender: "x", content: "first"  });
+    await call(a, "send_message", { channel: pCh, sender: "x", content: "second" });
+    await call(a, "send_message", { channel: pCh, sender: "x", content: "third"  });
+
+    // Prune with a huge threshold — nothing is that old → 0 deleted
+    const r1 = await call(a, "purge_channel", { channel: pCh, older_than_ms: 99999999 });
+    assert(r1.includes("Pruned 0"),
+      `purge older_than_ms: huge threshold prunes nothing (got: ${r1})`);
+
+    const after1  = await call(a, "read_messages", { channel: pCh, since_id: 0 });
+    const lines1  = after1.split("\n").filter(l => /^\[#\d+\]/.test(l));
+    assert(lines1.length === 3,
+      `purge older_than_ms: 3 messages still present after no-op prune (got ${lines1.length})`);
+
+    // Wait 120ms; then prune messages older than 60ms — all 3 qualify
+    await new Promise(r => setTimeout(r, 120));
+    const r2 = await call(a, "purge_channel", { channel: pCh, older_than_ms: 60 });
+    assert(r2.includes("Pruned 3"),
+      `purge older_than_ms: 3 old messages pruned (got: ${r2})`);
+
+    const after2 = await call(a, "read_messages", { channel: pCh, since_id: 0 });
+    assert(after2.includes("No new messages"),
+      "purge older_than_ms: channel empty after prune");
+
+    // Fresh message survives a large-threshold prune
+    await call(a, "send_message", { channel: pCh, sender: "x", content: "fresh" });
+    await call(a, "purge_channel", { channel: pCh, older_than_ms: 99999999 });
+    const after3  = await call(a, "read_messages", { channel: pCh, since_id: 0 });
+    const lines3  = after3.split("\n").filter(l => /^\[#\d+\]/.test(l));
+    assert(lines3.length === 1,
+      `purge older_than_ms: fresh message survives large-threshold prune (got ${lines3.length})`);
+
+    await call(a, "purge_channel", { channel: pCh });
+  }
+
+  // ── 31. post_gated_message success path ───────────────────────────────────────
+
+  console.log("\n31. post_gated_message: deps pre-satisfied and deps-satisfied-via-wait");
+  {
+    const pgOutCh = ch("gate-out");
+    const pgWaCh  = ch("gate-watch");
+    const depId   = `gate-dep-${RUN}`;
+    const depId2  = `gate-dep2-${RUN}`;
+
+    // Pre-satisfied: result exists BEFORE the gated call
+    await call(a, "send_message", { channel: pgWaCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: depId, summary: "PASS", body: {} }) });
+
+    const gRes1 = await call(a, "post_gated_message", {
+      channel:       pgOutCh,
+      sender:        "orchestrator",
+      content:       JSON.stringify({ type: "task", task_id: `gate-out-${RUN}`, subject: "gated task" }),
+      depends_on:    [depId],
+      watch_channel: pgWaCh,
+      timeout_ms:    2000,
+    });
+    assert(gRes1.includes("Sent #") || gRes1.includes("satisfied"),
+      `post_gated_message: pre-satisfied — message posted (got: ${gRes1})`);
+    assert(!gRes1.includes("Timed out"),
+      "post_gated_message: pre-satisfied — no timeout");
+
+    const out1 = await call(a, "read_messages", { channel: pgOutCh, since_id: 0 });
+    assert(out1.includes("gated task"),
+      "post_gated_message: gated message arrived in output channel");
+
+    // Via-wait: gated call runs BEFORE dep result exists, then dep is satisfied
+    const gResPromise = call(a, "post_gated_message", {
+      channel:       pgOutCh,
+      sender:        "orchestrator",
+      content:       JSON.stringify({ type: "task", task_id: `gate-out2-${RUN}`, subject: "gated task 2" }),
+      depends_on:    [depId2],
+      watch_channel: pgWaCh,
+      timeout_ms:    3000,
+    });
+
+    await new Promise(r => setTimeout(r, 50));
+    await call(b, "send_message", { channel: pgWaCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: depId2, summary: "PASS", body: {} }) });
+
+    const gRes2 = await gResPromise;
+    assert(gRes2.includes("Sent #") || gRes2.includes("satisfied"),
+      `post_gated_message: via-wait — message posted (got: ${gRes2})`);
+    assert(!gRes2.includes("Timed out"),
+      "post_gated_message: via-wait — no timeout");
+
+    const out2 = await call(a, "read_messages", { channel: pgOutCh, since_id: 0 });
+    assert(out2.includes("gated task 2"),
+      "post_gated_message: second gated message arrived in output channel");
+
+    await call(a, "purge_channel", { channel: pgOutCh });
+    await call(a, "purge_channel", { channel: pgWaCh  });
+  }
+
+  // ── 32. sprint_summary with control_channel ───────────────────────────────────
+
+  console.log("\n32. sprint_summary with control_channel: includes sprint boundary note");
+  {
+    const ns    = `cov-${RUN}-ss2`;
+    const ssCh  = `${ns}-status`;
+    const ccCh  = `${ns}-control`;
+    const inCh  = `${ns}-worker`;
+
+    // Sprint boundary note on control channel (type:note, subject starts with "sprint-")
+    await call(a, "send_message", { channel: ccCh, sender: "orchestrator",
+      content: JSON.stringify({
+        type:    "note",
+        subject: "sprint-2026-06-18-infra",
+        body:    "Starting sprint: add validator + heartbeat tooling",
+      }),
+    });
+
+    // Dispatch 2 tasks into the worker inbox
+    const t1 = `ss2-t1-${RUN}`, t2 = `ss2-t2-${RUN}`;
+    await call(a, "send_message", { channel: inCh, sender: "orchestrator",
+      content: JSON.stringify({ type: "task", task_id: t1 }) });
+    await call(a, "send_message", { channel: inCh, sender: "orchestrator",
+      content: JSON.stringify({ type: "task", task_id: t2 }) });
+
+    // Both complete: one PASS, one FAIL
+    await call(a, "send_message", { channel: ssCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: t1, summary: "PASS — done" }) });
+    await call(a, "send_message", { channel: ssCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: t2, summary: "FAIL — error" }) });
+
+    const ss = JSON.parse(await call(a, "sprint_summary", {
+      status_channel:  ssCh,
+      control_channel: ccCh,
+    }));
+
+    assert(ss.completed === 2,  `sprint_summary ctrl: completed=2 (got ${ss.completed})`);
+    assert(ss.failed    === 1,  `sprint_summary ctrl: failed=1 (got ${ss.failed})`);
+    assert(ss.sprint    !== null, "sprint_summary ctrl: sprint object present");
+    assert(ss.sprint?.subject?.includes("sprint-"),
+      `sprint_summary ctrl: sprint.subject has sprint- prefix (got: ${ss.sprint?.subject})`);
+    assert(typeof ss.sprint?.started_at === "string",
+      "sprint_summary ctrl: sprint.started_at is an ISO string");
+
+    await call(a, "purge_channel", { channel: ssCh });
+    await call(a, "purge_channel", { channel: ccCh });
+    await call(a, "purge_channel", { channel: inCh });
+  }
+
+  // ── 33. send_message_batch strict schema: entire batch rejected atomically ──────
+
+  console.log("\n33. send_message_batch: strict schema rejects entire batch atomically");
+  {
+    const bsCh   = ch("batch-schema");
+    const schema = JSON.stringify({
+      type: "object",
+      required: ["type", "payload"],
+      properties: {
+        type:    { type: "string" },
+        payload: { type: "string" },
+      },
+      additionalProperties: false,
+    });
+
+    await call(a, "register_channel_schema", { channel: bsCh, schema, strict: true });
+
+    // Batch with 2 valid messages and 1 invalid — strict schema must reject the whole thing
+    const resBad = await callRaw(a, "send_message_batch", {
+      messages: [
+        { channel: bsCh, sender: "orch", content: JSON.stringify({ type: "ping", payload: "a" }) },
+        { channel: bsCh, sender: "orch", content: JSON.stringify({ type: "ping", payload: "b" }) },
+        { channel: bsCh, sender: "orch", content: JSON.stringify({ type: "ping" }) }, // missing payload
+      ],
+    });
+    assert(resBad.isError === true,
+      "send_message_batch strict: entire batch rejected when any message fails schema");
+    assert(resBad.content[0].text.includes("schema validation failed"),
+      "send_message_batch strict: error text names the failure");
+
+    // Verify NO messages were inserted (atomic — broker validates all before inserting any)
+    const msgs = await call(a, "read_messages", { channel: bsCh, since_id: 0 });
+    assert(msgs.includes("No new messages"),
+      "send_message_batch strict: no messages inserted on batch rejection (atomic)");
+
+    // All-valid batch goes through
+    const resOk = await callRaw(a, "send_message_batch", {
+      messages: [
+        { channel: bsCh, sender: "orch", content: JSON.stringify({ type: "ping", payload: "x" }) },
+        { channel: bsCh, sender: "orch", content: JSON.stringify({ type: "pong", payload: "y" }) },
+      ],
+    });
+    assert(!resOk.isError,
+      "send_message_batch strict: all-valid batch accepted");
+    assert(resOk.content[0].text.includes("2 messages"),
+      `send_message_batch strict: 2 messages sent confirmed (got: ${resOk.content[0].text.slice(0, 80)})`);
+
+    await call(a, "clear_channel_schema", { channel: bsCh });
+    await call(a, "purge_channel",        { channel: bsCh });
   }
 
   // ── Teardown ──────────────────────────────────────────────────────────────────

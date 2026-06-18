@@ -413,10 +413,11 @@ async function run() {
     console.log("  - start/stop round-trip skipped (backend already running in this environment)");
   }
 
-  // Tool list includes all three
-  assert(toolNames.includes("list_workers"), "list_workers registered in tool list");
-  assert(toolNames.includes("start_worker"), "start_worker registered in tool list");
-  assert(toolNames.includes("stop_worker"),  "stop_worker registered in tool list");
+  // Tool list includes all three + sprint_file_conflicts
+  assert(toolNames.includes("list_workers"),         "list_workers registered in tool list");
+  assert(toolNames.includes("start_worker"),         "start_worker registered in tool list");
+  assert(toolNames.includes("stop_worker"),          "stop_worker registered in tool list");
+  assert(toolNames.includes("sprint_file_conflicts"),"sprint_file_conflicts registered in tool list");
 
   // ── 17. get_channel_schema / list_channel_schemas / clear_channel_schema ─────
   console.log("\n17. Channel schema tools (get / list / clear)");

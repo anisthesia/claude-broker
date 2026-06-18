@@ -915,6 +915,85 @@ function buildServer() {
     }) }] };
   });
 
+  // ── sprint_file_conflicts ────────────────────────────────────────────────────
+  // Pre-sprint-close conflict detector: aggregates affected_files from all
+  // type:result messages and surfaces files touched by more than one worker.
+  //
+  // Real incident: worker/bs cherry-picked orphaned commits that created
+  // deposit-reconciliation.service.ts; worker/backend also created the same
+  // file with different content (added try/catch). Sprint-close hit an add/add
+  // conflict that required manual --ours resolution + push before re-run.
+  // Running this tool first would have caught it before the merge script ran.
+  server.registerTool("sprint_file_conflicts", {
+    title: "Pre-sprint-close file conflict detector",
+    description: "Aggregates affected_files from all type:result messages on a status channel and returns files touched by more than one worker. Run before the sprint-close merge script to surface add/add or edit/edit conflicts that would otherwise fail mid-merge. Also reports workers whose results omit affected_files (blind spots where conflicts cannot be detected). One SQL scan — no channel history transfer needed.",
+    inputSchema: {
+      status_channel: z.string().min(1).describe("Status channel to scan, e.g. 'dv-status'."),
+      since_id: z.number().int().min(0).optional().describe("Only consider results with id > since_id. Omit to scan all messages on the channel (full sprint scan)."),
+    },
+  }, async ({ status_channel, since_id = 0 }) => {
+    const rows = db.prepare(`
+      SELECT sender, content FROM messages
+      WHERE channel = ?
+        AND id > ?
+        AND json_valid(content)
+        AND json_extract(content, '$.type') = 'result'
+      ORDER BY id ASC
+    `).all(status_channel, since_id);
+
+    // file → [{worker, task_id}]
+    const fileMap = new Map();
+    // workers that posted results without affected_files (undetectable conflicts)
+    const blindSpots = new Set();
+
+    for (const row of rows) {
+      let msg;
+      try { msg = JSON.parse(row.content); } catch { continue; }
+      const worker = msg.from || row.sender;
+      const taskId = msg.task_id || "?";
+      const summary = typeof msg.summary === "string" ? msg.summary : "";
+      if (summary.startsWith("SKIP")) continue; // SKIP results don't touch files
+
+      const files = Array.isArray(msg.affected_files) ? msg.affected_files : null;
+      if (!files || files.length === 0) {
+        blindSpots.add(worker);
+        continue;
+      }
+      for (const f of files) {
+        if (!fileMap.has(f)) fileMap.set(f, []);
+        fileMap.get(f).push({ worker, task_id: taskId });
+      }
+    }
+
+    const conflicts = [];
+    let cleanCount = 0;
+    for (const [file, touches] of fileMap.entries()) {
+      const workers = [...new Set(touches.map(t => t.worker))];
+      if (workers.length > 1) {
+        conflicts.push({ file, workers, touches });
+      } else {
+        cleanCount++;
+      }
+    }
+
+    const blindList = [...blindSpots];
+    const summary =
+      conflicts.length === 0
+        ? blindList.length > 0
+          ? `No detected conflicts — but ${blindList.length} worker(s) omitted affected_files: ${blindList.join(", ")}`
+          : "No conflicts detected — safe to run sprint-close"
+        : `${conflicts.length} conflict(s) detected — resolve before running sprint-close`;
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      status_channel,
+      since_id,
+      conflicts,               // files touched by 2+ workers → merge conflict risk
+      clean_count: cleanCount, // single-owner files (safe)
+      blind_spots: blindList,  // workers that omitted affected_files
+      summary,
+    }) }] };
+  });
+
   // ── stop_worker ──────────────────────────────────────────────────────────────
   server.registerTool("stop_worker", {
     title: "Stop a worker watchdog",
