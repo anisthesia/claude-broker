@@ -179,6 +179,26 @@ Tokens NEVER authorize: `purge_channel`, force-push, hook bypass, secret rotatio
 or anything outside `authorized_actions`. Each sprint requires a fresh token —
 never reuse a prior sprint's approval.
 
+## Worker stop conditions
+
+Check these after each turn-start ritual. Use `get_latest_per_sender("cb-telemetry")` for heartbeat
+state/cost, `list_workers` for PID/uptime, `read_messages("cb-status", ...)` for result history.
+Stop via `stop_worker(name=<worker>)` — this SIGTERMs the watchdog + in-flight Claude session.
+
+| Condition | How to detect | Action |
+|---|---|---|
+| **Blocked-on-question > 30 min** | Heartbeat `state: "blocked-on-question"` and `ts` is >30 min old | Stop worker → send answer to its inbox → restart |
+| **Session timeout loop (≥3 in a row)** | ≥3 consecutive `session-end` heartbeats with `exit_code: 124` and no `type: result` for the in-flight `task_id` on `cb-status` between them | Stop worker → break the task into smaller sub-tasks → re-dispatch |
+| **Cost runaway (>$3 session, no result)** | `cost_since_start.estimated_usd > 3.0` in a `session-end` heartbeat and `check_result` returns no result for the task_id | Stop worker → review task body for scope creep → simplify and re-dispatch |
+| **Sprint closed, inbox empty** | All in-sprint task_ids have `type: result` on `cb-status` and worker inbox is empty | Stop worker — no more work this sprint |
+| **File conflict in-flight** | Two workers both have in-progress tasks that own the same file (e.g. both touching `server.js`) | Stop the lower-priority worker → re-dispatch it with `depends_on` pointing to the first worker's task_id |
+
+**Rules:**
+- Never stop a worker mid-task without first checking `check_result` — it may have already finished.
+- After stopping for blocked-on-question or timeout loop, always answer/fix the root cause before restarting. Don't just restart blindly.
+- Cost runaway stop requires you to post a `type: note` on `cb-status` explaining why you stopped it, so the session-end telemetry is not the only record.
+- Sprint-closed stops are the only stops that don't require a follow-up action.
+
 ## Starting workers
 
 Each worker runs via the dogsvilla watchdog script. Open a terminal tab per worker:

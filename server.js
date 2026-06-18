@@ -1049,9 +1049,12 @@ app.post("/workers/:name/stop", auth, (req, res) => {
 // GET /cost?since=<ISO-date> — aggregate session costs from dv-telemetry.
 // Returns { total_usd, sessions, by_worker: [{worker, sessions, total_usd}] }
 app.get("/cost", auth, (req, res) => {
-  const since = req.query.since
-    ? new Date(req.query.since).getTime()
-    : Date.now() - 24 * 60 * 60 * 1000; // default: last 24h
+  let since = Date.now() - 24 * 60 * 60 * 1000; // default: last 24h
+  if (req.query.since) {
+    const parsed = new Date(req.query.since).getTime();
+    if (isNaN(parsed)) return res.status(400).json({ error: "Invalid since date" });
+    since = parsed;
+  }
 
   const rows = stmtCostEndpointRows.all(since);
 
@@ -1076,9 +1079,12 @@ app.get("/cost", auth, (req, res) => {
 // Returns rate limit hit log from dv-rate-limits channel.
 // { total_hits, by_worker: [{worker, hits, models, total_backoff_s, last_hit}], events: [...] }
 app.get("/rate-limits", auth, (req, res) => {
-  const since = req.query.since
-    ? new Date(req.query.since).getTime()
-    : Date.now() - 7 * 24 * 60 * 60 * 1000; // default: last 7 days
+  let since = Date.now() - 7 * 24 * 60 * 60 * 1000; // default: last 7 days
+  if (req.query.since) {
+    const parsed = new Date(req.query.since).getTime();
+    if (isNaN(parsed)) return res.status(400).json({ error: "Invalid since date" });
+    since = parsed;
+  }
 
   const rows = stmtRlEndpointRows.all(since);
 
