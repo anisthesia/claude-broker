@@ -199,6 +199,18 @@ Stop via `stop_worker(name=<worker>)` — this SIGTERMs the watchdog + in-flight
 - Cost runaway stop requires you to post a `type: note` on `cb-status` explaining why you stopped it, so the session-end telemetry is not the only record.
 - Sprint-closed stops are the only stops that don't require a follow-up action.
 
+### Liveness enforcement during long-poll
+
+When waiting on a worker result, never issue a single unbounded `wait_for_messages` call:
+
+- Break long-polls into **max 5-minute chunks** (`timeout_ms=300000`)
+- After each chunk times out, call `get_latest_per_sender("cb-telemetry")` and check heartbeat freshness
+- If a worker's last heartbeat `ts` is **>10 min old** and `state` was `"working"`, treat as **silent-death**:
+  1. `stop_worker(name=<worker>)`
+  2. Post `type: note` to `cb-status` explaining the escalation
+  3. `AskUserQuestion` before restarting
+- **Do not** accumulate more than **3 consecutive timeouts** without a telemetry check
+
 ## Starting workers
 
 Each worker runs via the dogsvilla watchdog script. Open a terminal tab per worker:

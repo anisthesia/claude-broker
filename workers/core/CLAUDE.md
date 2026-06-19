@@ -68,6 +68,18 @@ After posting `type: result`:
 
 `wait_for_messages` is only for `depends_on` blocking within a task.
 
+### Context check before idle-loop pickup
+
+Before draining the next task from the inbox (step 1 of the idle drain loop):
+- Check if `rotation_recommended: true` is in the last heartbeat, or if your context is above ~50% of the tier threshold
+- If so, **exit cleanly instead of picking up the task** — post to `cb-status`:
+  ```json
+  { "type": "status", "task_id": "context-check-<YYYY-MM-DD>",
+    "from": "core", "to": "orchestrator", "subject": "context rotation before idle pickup",
+    "body": { "reason": "context-rotation-before-idle-pickup", "rotation_recommended": true } }
+  ```
+- Then post the exit note and stop. The watchdog restarts a fresh session that picks up the inbox task cleanly.
+
 **Exit note** (post before every exit):
 ```json
 {
