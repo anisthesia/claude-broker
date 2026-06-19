@@ -99,6 +99,19 @@ For any task that writes code:
 5. Include in result: `body.commits: [{sha, branch, message}]`
 6. If no files changed: `commits: [], no_commit_reason: "<reason>"`
 
+## Broker restart
+
+After every commit that modifies `server.js`, restart the broker before running `node test-v2.js` or posting `type: result`:
+
+```bash
+kill $(lsof -ti:8080 | head -1) && sleep 1 && npm start &
+sleep 2  # wait for broker to accept connections
+```
+
+Reason: the broker runs with `npm start` (no --watch). Tests against a stale broker will pass even if the new tool is broken — or fail even if the code is correct.
+
+Verify the broker restarted: `curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/` should return 404 (expected — no / route).
+
 ## Result envelope
 
 Every `type: result` must include a top-level `summary` field:
