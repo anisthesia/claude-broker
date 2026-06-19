@@ -387,10 +387,11 @@ async function run() {
     // Task with ui_verified in required_checks AND ui_verified_instructions present
     const taskWithUiInstructions = JSON.stringify({
       type: "task",
-      task_id: `ui-task-${RUN}`,
+      task_id: `fix-2026-06-20-ui-task`,
       from:    "orchestrator",
       to:      "frontend",
       subject: "UI test task",
+      body:    "verify the award badge flow",
       required_checks: ["lint", "build", "ui_verified"],
       ui_verified_instructions: "Open /dogs → click Award Badge → confirm dropdown shows badge names",
     });
@@ -402,10 +403,11 @@ async function run() {
     // Task WITHOUT ui_verified_instructions must also be accepted (field is optional)
     const taskNoUi = JSON.stringify({
       type: "task",
-      task_id: `no-ui-task-${RUN}`,
+      task_id: `fix-2026-06-20-no-ui-task`,
       from:    "orchestrator",
       to:      "backend",
       subject: "Non-UI task",
+      body:    "run backend checks",
       required_checks: ["lint", "build", "test"],
     });
     const resNoUi = await callRaw(a, "send_message", { channel: strictCh, sender: "orchestrator", content: taskNoUi });

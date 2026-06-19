@@ -386,11 +386,11 @@ async function run() {
     const inboxSchema = readFileSync("schemas/dv-worker-inbox.json", "utf-8");
     await call(a, "register_channel_schema", { channel: iCh, schema: inboxSchema, strict: true });
 
-    // New types must all pass
+    // New types must all pass (task_ids use date format required by pqa-010 schema tightening)
     const newTypes = ["consent-grant", "consent-deny", "rotate", "reload"];
     for (const type of newTypes) {
       const r = await callRaw(a, "send_message", { channel: iCh, sender: "platform-orch", content: JSON.stringify({
-        type, task_id: `${type}-${RUN}`, from: "platform-orch", to: "backend",
+        type, task_id: `fix-2026-06-20-${type}`, from: "platform-orch", to: "backend",
         subject: `${type} signal`,
       })});
       assert(!r.isError, `inbox: type="${type}" accepted`);
@@ -398,40 +398,45 @@ async function run() {
 
     // qa sender passes (was const: "orchestrator")
     const qaR = await callRaw(a, "send_message", { channel: iCh, sender: "qa", content: JSON.stringify({
-      type: "task", task_id: `qa-coverage-${RUN}`, from: "qa", to: "backend",
+      type: "task", task_id: `fix-2026-06-20-qa-coverage`, from: "qa", to: "backend",
       subject: "write tests for auth module",
+      body: "run test suite",
       required_checks: ["test"],
     })});
     assert(!qaR.isError, `inbox: from="qa" accepted (not restricted to orchestrator)`);
 
     // Arbitrary worker in to field passes (was limited to 3)
     const newWorkerTos = ["backend-services", "seo", "qa-backend", "devops", "*"];
+    let toIdx = 0;
     for (const to of newWorkerTos) {
       const r = await callRaw(a, "send_message", { channel: iCh, sender: "intel-orch", content: JSON.stringify({
-        type: "task", task_id: `dispatch-${to}-${RUN}`, from: "intel-orch", to,
+        type: "task", task_id: `fix-2026-06-20-dispatch-to${toIdx++}`, from: "intel-orch", to,
         subject: "dispatch task",
+        body: "execute",
       })});
       assert(!r.isError, `inbox: to="${to}" accepted`);
     }
 
-    // Relaxed task_id pattern — no strict date-suffix required
-    const looseTaskIds = [
-      `qa-obs-auth-task-2026-06-09`,          // was rejected by old pattern (no suffix after date)
-      `simple-task`,                           // bare slug
-      `coverage-patch-2026-06-09-auth-jwt`,    // well-formed
+    // Valid task_id patterns (pqa-010 added strict pattern: <slug>-YYYY-MM-DD-<slug>)
+    const validTaskIds = [
+      `qa-obs-auth-task-2026-06-09-v1`,       // added suffix to previously-borderline id
+      `simple-task-2026-06-20-run`,            // date+suffix format
+      `coverage-patch-2026-06-09-auth-jwt`,    // already well-formed
     ];
-    for (const task_id of looseTaskIds) {
+    for (const task_id of validTaskIds) {
       const r = await callRaw(a, "send_message", { channel: iCh, sender: "orchestrator", content: JSON.stringify({
         type: "task", task_id, from: "orchestrator", to: "backend", subject: "test",
+        body: "execute",
       })});
       assert(!r.isError, `inbox: task_id="${task_id}" accepted with relaxed pattern`);
     }
 
     // depends_on with any worker reference accepted
     const depsR = await callRaw(a, "send_message", { channel: iCh, sender: "orchestrator", content: JSON.stringify({
-      type: "task", task_id: `dep-test-${RUN}`, from: "orchestrator", to: "frontend",
+      type: "task", task_id: `fix-2026-06-20-dep-test`, from: "orchestrator", to: "frontend",
       subject: "depends on new workers",
-      depends_on: ["data-pipeline-2026-06-09:backend-services", "qa-baseline-2026-06-09:qa-backend"],
+      body: "execute after deps",
+      depends_on: ["data-pipeline-2026-06-09-done:backend-services", "qa-baseline-2026-06-09-done:qa-backend"],
     })});
     assert(!depsR.isError, "inbox: depends_on with non-3-worker references accepted");
 

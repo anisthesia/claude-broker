@@ -133,6 +133,17 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, validContract);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid contract-change with wire_compat accepted", t);
 
+  // 7a. type:task missing body → warn
+  const taskNoBody = {
+    type: "task",
+    task_id: "rp-2026-06-19-wi-nobody",
+    from: "orchestrator",
+    to: "api",
+    subject: "task without body",
+  };
+  t = await send(client, ch, taskNoBody);
+  expect(/WARN/.test(t), "worker-inbox: type:task missing body → warn", t);
+
   // 8. approval-token with empty body (missing required fields) → warn
   const tokenMissingBody = {
     type: "approval-token",
@@ -284,7 +295,7 @@ async function testStatus(client) {
   let t = await send(client, ch, validStatus);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:status accepted, no warn", t);
 
-  // 2. Valid result with summary (no production_touching) → no consent_basis needed
+  // 2. Valid result with summary and consent_basis → no warn
   const validResult = {
     type: "result",
     task_id: "rp-2026-06-19-st-r01",
@@ -292,10 +303,10 @@ async function testStatus(client) {
     to: "orchestrator",
     subject: "tests done",
     summary: "PASS — all 42 tests pass",
-    body: {},
+    body: { consent_basis: "orchestrator-dispatch-only" },
   };
   t = await send(client, ch, validResult);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:result without production_touching accepted", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:result with consent_basis accepted", t);
 
   // 3. type:result without summary → warn
   const resultNoSummary = {
@@ -335,6 +346,35 @@ async function testStatus(client) {
   };
   t = await send(client, ch, resultWithConsent);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true with consent_basis accepted", t);
+
+  // 5a. type:result without consent_basis (no production_touching) → warn
+  const resultNoConsentNoPT = {
+    type: "result",
+    task_id: "rp-2026-06-19-st-r05a",
+    from: "qa",
+    to: "orchestrator",
+    subject: "test run complete",
+    summary: "PASS — all tests pass",
+    body: {},
+  };
+  t = await send(client, ch, resultNoConsentNoPT);
+  expect(/WARN/.test(t), "status: type:result without consent_basis → warn in warn-only", t);
+
+  // 5b. type:result with non-empty commits but no affected_files → warn
+  const resultCommitsNoAffected = {
+    type: "result",
+    task_id: "rp-2026-06-19-st-r05b",
+    from: "api",
+    to: "orchestrator",
+    subject: "committed migration",
+    summary: "PASS — migration applied",
+    body: {
+      consent_basis: "orchestrator-dispatch-only",
+      commits: [{ sha: "abc1234", branch: "main", message: "add migration" }],
+    },
+  };
+  t = await send(client, ch, resultCommitsNoAffected);
+  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
 
   // 6. Valid handoff → no warn
   const validHandoff = {

@@ -114,7 +114,7 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, tokenMissingBody);
   expect(/WARN/.test(t), "worker-inbox: approval-token missing body → warn", t);
 
-  // 7. Valid approval-token with all required body fields → accepted
+  // 7. approval-token (removed from enum) → warn even with full body
   const validToken = {
     type: "approval-token",
     task_id: "cb-2026-06-19-wi-tok-ok",
@@ -129,9 +129,19 @@ async function testWorkerInbox(client) {
     },
   };
   t = await send(client, ch, validToken);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token with full body accepted", t);
+  expect(/WARN/.test(t), "worker-inbox: approval-token (removed from enum) → warn", t);
 
-  // 8. Flip to strict; missing task_id rejected
+  // 8. task_id 'abc' (no date pattern) → warn
+  const badTaskId = { type: "note", task_id: "abc", from: "orchestrator", to: "core", subject: "bad task_id pattern" };
+  t = await send(client, ch, badTaskId);
+  expect(/WARN/.test(t), "worker-inbox: task_id 'abc' (no date pattern) → warn", t);
+
+  // 9. type:task missing body → warn
+  const taskNoBody = { type: "task", task_id: "cb-2026-06-19-wi-nobody", from: "orchestrator", to: "core", subject: "task without body" };
+  t = await send(client, ch, taskNoBody);
+  expect(/WARN/.test(t), "worker-inbox: type:task missing body → warn", t);
+
+  // 10. Flip to strict; missing task_id rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "worker-inbox: schema re-registered strict");
 
@@ -188,7 +198,12 @@ async function testOrchestratorInbox(client) {
   t = await send(client, ch, unknownType);
   expect(/WARN/.test(t), "orch-inbox: type:task (not allowed) → warn", t);
 
-  // 5. Strict: missing task_id rejected
+  // 5. type:result (removed from enum) → warn
+  const typeResult = { type: "result", task_id: "cb-2026-06-19-oi-res", from: "core", to: "orchestrator", subject: "result not allowed in orchestrator-inbox" };
+  t = await send(client, ch, typeResult);
+  expect(/WARN/.test(t), "orch-inbox: type:result (removed from enum) → warn", t);
+
+  // 6. Strict: missing task_id rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "orch-inbox: schema re-registered strict");
 
@@ -212,9 +227,10 @@ async function testControl(client) {
   let r = await registerSchema(client, ch, file, false);
   expect(/Registered schema/.test(r.content?.[0]?.text), "control: schema registered warn-only");
 
-  // 1. Valid sprint-start (task_id optional on control)
+  // 1. Valid sprint-start
   const validSprint = {
     type: "sprint-start",
+    task_id: "cb-2026-06-19-ctrl-sp1",
     sprint_id: "cb-sprint-test-001",
     from: "orchestrator",
     to: "*",
@@ -225,7 +241,7 @@ async function testControl(client) {
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid sprint-start accepted, no warn", t);
 
   // 2. Valid rotate
-  const validRotate = { type: "rotate", from: "orchestrator", to: "protocol-qa", subject: "rotate now" };
+  const validRotate = { type: "rotate", task_id: "cb-2026-06-19-ctrl-rot", from: "orchestrator", to: "protocol-qa", subject: "rotate now" };
   t = await send(client, ch, validRotate);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid rotate accepted, no warn", t);
 
@@ -247,6 +263,7 @@ async function testControl(client) {
   // 6. Valid approval-revoke with revokes_msg_id
   const validRevoke = {
     type: "approval-revoke",
+    task_id: "cb-2026-06-19-ctrl-rev",
     from: "orchestrator",
     to: "*",
     subject: "token revoked",
@@ -255,7 +272,17 @@ async function testControl(client) {
   t = await send(client, ch, validRevoke);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid approval-revoke accepted", t);
 
-  // 7. Strict: missing subject rejected
+  // 7. Missing task_id → warn (task_id now required)
+  const missingTaskId = { type: "note", from: "orchestrator", to: "*", subject: "no task_id here" };
+  t = await send(client, ch, missingTaskId);
+  expect(/WARN/.test(t), "control: missing task_id → warn in warn-only", t);
+
+  // 8. sprint-start without sprint_id → warn
+  const sprintNoId = { type: "sprint-start", task_id: "cb-2026-06-19-ctrl-sp2", from: "orchestrator", to: "*", subject: "sprint without sprint_id" };
+  t = await send(client, ch, sprintNoId);
+  expect(/WARN/.test(t), "control: sprint-start without sprint_id → warn", t);
+
+  // 9. Strict: missing subject rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "control: schema re-registered strict");
 
@@ -457,6 +484,52 @@ async function testTelemetry(client) {
   await clearSchema(client, ch);
 }
 
+// ─── cb-backlog ──────────────────────────────────────────────────────────────
+
+async function testBacklog(client) {
+  console.log("\n── cb-backlog ──");
+  const ch = `cb-bl-test-${RUN_TAG}`;
+  const file = "schemas/cb-backlog.json";
+
+  let r = await registerSchema(client, ch, file, false);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "backlog: schema registered warn-only");
+
+  // 1. Valid deferred with deferred_reason → no warn
+  const validDeferred = {
+    type: "deferred",
+    task_id: "cb-2026-06-19-bl-001",
+    subject: "add cb-backlog schema coverage",
+    from: "protocol-qa",
+    deferred_reason: "too many open tasks in current sprint",
+  };
+  let t = await send(client, ch, validDeferred);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "backlog: valid deferred accepted, no warn", t);
+
+  // 2. type:deferred without deferred_reason → warn
+  const deferredNoReason = {
+    type: "deferred",
+    task_id: "cb-2026-06-19-bl-002",
+    subject: "no deferred_reason",
+    from: "core",
+  };
+  t = await send(client, ch, deferredNoReason);
+  expect(/WARN/.test(t), "backlog: type:deferred without deferred_reason → warn", t);
+  expect(/Sent #/.test(t), "backlog: type:deferred without deferred_reason still stored in warn-only", t);
+
+  // 3. Strict: deferred without deferred_reason → rejected
+  r = await registerSchema(client, ch, file, true);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "backlog: schema re-registered strict");
+
+  t = await send(client, ch, deferredNoReason);
+  expect(/schema validation failed/.test(t), "backlog strict: deferred without deferred_reason → rejected", t);
+
+  // 4. Strict: valid deferred accepted
+  t = await send(client, ch, validDeferred);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "backlog strict: valid deferred accepted", t);
+
+  await clearSchema(client, ch);
+}
+
 // ─── setup-schemas-broker.js idempotent re-run ──────────────────────────────
 
 async function testSetupIdempotency() {
@@ -501,6 +574,7 @@ async function main() {
   await testControl(client);
   await testStatus(client);
   await testTelemetry(client);
+  await testBacklog(client);
 
   await transport.close();
 
