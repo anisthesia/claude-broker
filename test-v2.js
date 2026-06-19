@@ -382,8 +382,8 @@ async function run() {
   const startBad = await a.callTool({ name: "start_worker", arguments: { name: "nonexistent-worker-xyz" } });
   assert(startBad.isError === true || startBad.content[0].text.includes("not found"), "start_worker: unknown worker returns error");
 
-  // stop_worker on a not-running worker returns isError
-  const stopIdle = await a.callTool({ name: "stop_worker", arguments: { name: "backend" } });
+  // stop_worker on a not-running worker returns isError (use a name that is never in watchdogProcs)
+  const stopIdle = await a.callTool({ name: "stop_worker", arguments: { name: "nonexistent-worker-xyz" } });
   assert(stopIdle.isError === true || stopIdle.content[0].text.includes("not running"), "stop_worker: not-running worker returns error");
 
   // list_workers + start + stop round-trip (only if WATCHDOG_BIN is configured)
@@ -465,8 +465,69 @@ async function run() {
   // cleanup second schema channel
   await call(a, "clear_channel_schema", { channel: ssch2 });
 
+  // ── 18. get_latest_heartbeats ────────────────────────────────────────────────
+  console.log("\n18. get_latest_heartbeats");
+  const hbch = `test-hb-${Date.now()}`;
+
+  // Upsert 2 heartbeats: one normal, one rotation-recommended (tier_threshold_pct >= 80)
+  await call(a, "upsert_heartbeat", {
+    channel: hbch,
+    sender:  "worker-normal",
+    content: JSON.stringify({
+      activity: { state: "active" },
+      context:  { tier_threshold_pct: 40, rotation_recommended: false },
+    }),
+  });
+  await call(a, "upsert_heartbeat", {
+    channel: hbch,
+    sender:  "worker-rotating",
+    content: JSON.stringify({
+      activity: { state: "active" },
+      context:  { tier_threshold_pct: 85, rotation_recommended: true },
+    }),
+  });
+
+  const hbRaw = await call(a, "get_latest_heartbeats", { channel: hbch });
+  let hbResult;
+  try {
+    hbResult = JSON.parse(hbRaw);
+    assert(true, "get_latest_heartbeats: response is valid JSON");
+  } catch (e) {
+    assert(false, "get_latest_heartbeats: response is valid JSON", e.message);
+  }
+
+  assert(Array.isArray(hbResult?.workers), "get_latest_heartbeats: workers is an array");
+  assert(hbResult?.workers?.length === 2, `get_latest_heartbeats: 2 workers returned (got ${hbResult?.workers?.length})`);
+
+  // Each worker entry must contain the required fields
+  for (const w of (hbResult?.workers ?? [])) {
+    for (const f of ["sender", "state", "tier_threshold_pct", "rotation_recommended"]) {
+      assert(f in w, `get_latest_heartbeats: worker '${w.sender}' has field '${f}'`);
+    }
+  }
+
+  const normalW   = hbResult?.workers?.find(w => w.sender === "worker-normal");
+  const rotatingW = hbResult?.workers?.find(w => w.sender === "worker-rotating");
+  assert(normalW?.rotation_recommended === false,  "get_latest_heartbeats: normal worker rotation_recommended=false");
+  assert(rotatingW?.rotation_recommended === true, "get_latest_heartbeats: rotating worker rotation_recommended=true");
+  assert(rotatingW?.tier_threshold_pct >= 80,      `get_latest_heartbeats: rotating worker tier_threshold_pct>=80 (got ${rotatingW?.tier_threshold_pct})`);
+
+  assert(hbResult?.summary?.total_workers === 2,
+    `get_latest_heartbeats: summary.total_workers=2 (got ${hbResult?.summary?.total_workers})`);
+  assert(
+    Array.isArray(hbResult?.summary?.rotating) && hbResult.summary.rotating.includes("worker-rotating"),
+    "get_latest_heartbeats: summary.rotating includes 'worker-rotating'",
+  );
+  assert(
+    Array.isArray(hbResult?.summary?.stale_5min) && hbResult.summary.stale_5min.length === 0,
+    "get_latest_heartbeats: summary.stale_5min is empty (just posted)",
+  );
+
+  assert(toolNames.includes("get_latest_heartbeats"), "get_latest_heartbeats: registered in tool list");
+  assert(toolNames.includes("upsert_heartbeat"),       "upsert_heartbeat: registered in tool list");
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
-  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2]) {
+  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   await ta.close();
