@@ -36,5 +36,13 @@
 
   { "name": "core",        "ns": "cb", "args": ["workers/core",        "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-core"] },
   { "name": "protocol-qa", "ns": "cb", "args": ["workers/protocol-qa", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-protocol-qa"] },
-  { "name": "infra-orch",  "ns": "cb", "args": ["orchestrators/infra", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-orchestrator"] }
+  { "name": "infra-orch",  "ns": "cb", "args": ["orchestrators/infra", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-orchestrator"] },
+
+  { "name": "rp-api",     "ns": "rp", "args": ["ridepro-api",     "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-api"] },
+  { "name": "rp-admin",   "ns": "rp", "args": ["ridepro-admin",   "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-admin"] },
+  { "name": "rp-web",     "ns": "rp", "args": ["ridepro-website", "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-web"] },
+  { "name": "rp-android", "ns": "rp", "args": ["android",         "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-android"] },
+  { "name": "rp-ios",     "ns": "rp", "args": ["ios",             "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-ios"] },
+  { "name": "rp-qa",      "ns": "rp", "args": ["qa",              "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-qa"] },
+  { "name": "rp-orch",    "ns": "rp", "args": ["orchestrators",   "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-orchestrator"] }
 ]
