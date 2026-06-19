@@ -5,8 +5,13 @@ the orchestrator from "reconstruct system state from message archaeology" to
 "read it directly," and stop workers from silently violating the envelope
 contract.
 
-Status: spec, not yet implemented. Drafted 2026-05-27 from the dogsvilla pilot
-cost analysis.
+Drafted 2026-05-27 from the dogsvilla pilot cost analysis.
+
+| Spec | Status | Notes |
+|---|---|---|
+| Spec 1 — Heartbeat + telemetry channel | **Implemented** | `upsert_heartbeat`, `get_latest_per_sender` tools live; dv-telemetry + cb-telemetry registered |
+| Spec 2 — Broker-side envelope validator | **Implemented** | `register_channel_schema`, warn-only mode live; dv-* and cb-* schemas registered |
+| Spec 3 — Sprint-close conflict pre-flight | **Implemented** | `sprint_file_conflicts` tool live; dv-status schema enforces `affected_files` |
 
 Motivating data: the dogsvilla pilot (4 sessions, 34h, 4815 turns) cost
 ~$3,472 at API-equivalent pricing. ~$1,200 of that was the 1M-context-tier
@@ -402,6 +407,47 @@ Before calling `scripts/sprint-close-merge.sh`, add this step:
     - If blind_spots non-empty: warn; those workers may have undetected
       conflicts. Check their affected files manually via git diff.
 ```
+
+---
+
+## Schema registry — current coverage
+
+All schemas registered warn-only (strict=false). Flip to strict only after two
+clean sprints with no `[claude-broker] schema warn` lines in broker logs.
+
+Registration script: `node setup-schemas-broker.js` (re-run is idempotent).
+
+### dogsvilla (`dv-` namespace)
+
+| Channel | Schema file | Registered | Strict |
+|---|---|---|---|
+| `dv-backend`, `dv-frontend`, `dv-customer-portal` | `schemas/dv-worker-inbox.json` | 2026-05-27 | warn-only |
+| `dv-orchestrator` | *(uses dv-worker-inbox schema)* | 2026-05-27 | warn-only |
+| `dv-control` | `schemas/dv-control.json` | 2026-05-27 | warn-only |
+| `dv-status` | `schemas/dv-status.json` | 2026-05-27 | warn-only |
+| `dv-telemetry` | `schemas/dv-telemetry.json` | 2026-05-27 | warn-only |
+
+Registered via `node setup-schemas.js`.
+
+### claude-broker self-maintenance (`cb-` namespace)
+
+| Channel | Schema file | Registered | Strict |
+|---|---|---|---|
+| `cb-core` | `schemas/cb-worker-inbox.json` | 2026-06-19 | warn-only |
+| `cb-protocol-qa` | `schemas/cb-worker-inbox.json` | 2026-06-19 | warn-only |
+| `cb-orchestrator` | `schemas/cb-orchestrator-inbox.json` | 2026-06-19 | warn-only |
+| `cb-control` | `schemas/cb-control.json` | 2026-06-19 | warn-only |
+| `cb-status` | `schemas/cb-status.json` | 2026-06-19 | warn-only |
+| `cb-telemetry` | `schemas/cb-telemetry.json` | 2026-06-19 | warn-only |
+
+Registered via `node setup-schemas-broker.js`.
+
+Key cb-* schema constraints:
+- `cb-status` type:result requires `summary` and `body.consent_basis`. Use
+  `"consent_basis": "orchestrator-dispatch-only"` for non-production tasks.
+- `cb-status` type:result with `body.commits` non-empty requires `affected_files`.
+- `cb-worker-inbox` type:approval-token requires full `body` (authorized_actions,
+  env, scope_workers, expires_at).
 
 ---
 
