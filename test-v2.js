@@ -530,6 +530,10 @@ async function run() {
   for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
+  // clear any schemas registered on test channels (safety net if test fails mid-run)
+  for (const c of [ssch, ssch2]) {
+    await call(a, "clear_channel_schema", { channel: c }).catch(() => {});
+  }
   await ta.close();
   await tb.close();
 

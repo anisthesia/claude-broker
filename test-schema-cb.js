@@ -464,7 +464,7 @@ async function testSetupIdempotency() {
   const { execSync } = await import("child_process");
   let output, exitCode;
   try {
-    output = execSync("node setup-schemas-broker.js", { encoding: "utf-8", env: process.env });
+    output = execSync(`"${process.execPath}" setup-schemas-broker.js`, { encoding: "utf-8", env: process.env });
     exitCode = 0;
   } catch (e) {
     output = e.stdout + e.stderr;
@@ -480,7 +480,7 @@ async function testSetupIdempotency() {
 
   // Second run — must also exit 0 (idempotent)
   try {
-    output = execSync("node setup-schemas-broker.js", { encoding: "utf-8", env: process.env });
+    output = execSync(`"${process.execPath}" setup-schemas-broker.js`, { encoding: "utf-8", env: process.env });
     exitCode = 0;
   } catch (e) {
     output = e.stdout + e.stderr;
