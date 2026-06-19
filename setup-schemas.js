@@ -22,6 +22,9 @@ const REGISTRATIONS = [
   { channel: "dv-status",          file: "schemas/dv-status.json" },
   { channel: "dv-control",         file: "schemas/dv-control.json" },
   { channel: "dv-telemetry",       file: "schemas/dv-telemetry.json" },
+  { channel: "dv-backlog",         file: "schemas/dv-backlog.json" },
+  { channel: "dv-intel-status",    file: "schemas/dv-cluster-status.json" },
+  { channel: "dv-platform-status", file: "schemas/dv-cluster-status.json" },
 ];
 
 async function main() {
