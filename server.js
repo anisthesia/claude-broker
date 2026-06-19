@@ -112,8 +112,14 @@ const stmtSchemaUpsert = db.prepare(`
   INSERT INTO channel_schemas (channel, schema, strict, updated_at) VALUES (?, ?, ?, ?)
   ON CONFLICT(channel) DO UPDATE SET schema=excluded.schema, strict=excluded.strict, updated_at=excluded.updated_at
 `);
-const stmtSchemaDel    = db.prepare("DELETE FROM channel_schemas WHERE channel = ?");
-const stmtSchemaList   = db.prepare("SELECT channel, strict, updated_at FROM channel_schemas ORDER BY channel");
+const stmtSchemaDel         = db.prepare("DELETE FROM channel_schemas WHERE channel = ?");
+const stmtSchemaList        = db.prepare("SELECT channel, strict, updated_at FROM channel_schemas ORDER BY channel");
+const stmtSchemaListPrefix  = db.prepare("SELECT channel, strict, updated_at FROM channel_schemas WHERE channel LIKE ? ORDER BY channel");
+
+// One-shot migration: purge reg-* test debris
+if (db.prepare("SELECT COUNT(*) AS n FROM channel_schemas WHERE channel LIKE 'reg-%'").get().n > 0) {
+  db.prepare("DELETE FROM channel_schemas WHERE channel LIKE 'reg-%'").run();
+}
 
 const stmtLatestPerSender = db.prepare(`
   SELECT m.id, m.sender, m.content, m.created_at
@@ -782,10 +788,12 @@ function buildServer() {
   // ── list_channel_schemas ────────────────────────────────────────────────────
   server.registerTool("list_channel_schemas", {
     title: "List channel schemas",
-    description: "Show all channels with a schema bound, including strict-mode status.",
-    inputSchema: {},
-  }, async () => {
-    const rows = stmtSchemaList.all();
+    description: "Show all channels with a schema bound, including strict-mode status. Pass prefix to filter by channel name prefix (e.g. 'cb-' returns only cb-* entries). Omit prefix to return all.",
+    inputSchema: {
+      prefix: z.string().optional().describe("Only return schemas for channels starting with this prefix, e.g. 'cb-'. Omit for all."),
+    },
+  }, async ({ prefix } = {}) => {
+    const rows = prefix ? stmtSchemaListPrefix.all(`${prefix}%`) : stmtSchemaList.all();
     if (rows.length === 0) return { content: [{ type: "text", text: "(no channel schemas registered)" }] };
     const text = rows.map(r => `${r.channel}\tstrict=${r.strict ? "on" : "off"}\tupdated=${new Date(r.updated_at).toISOString()}`).join("\n");
     return { content: [{ type: "text", text }] };
