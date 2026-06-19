@@ -6,7 +6,7 @@
   "required": ["type", "task_id", "from", "to", "subject"],
   "properties": {
     "type": {
-      "enum": ["question", "note", "status", "result"]
+      "enum": ["question", "note", "status"]
     },
     "task_id": { "type": "string", "minLength": 3 },
     "from": {

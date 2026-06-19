@@ -19,6 +19,10 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "type": { "const": "deferred" } }, "required": ["type"] },
+      "then": { "required": ["deferred_reason"] }
+    },
+    {
       "if": { "properties": { "type": { "const": "deferred-resolved" } }, "required": ["type"] },
       "then": {
         "properties": {

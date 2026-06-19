@@ -3,7 +3,7 @@
   "title": "claude-broker cb-control broadcast envelope",
   "description": "Orchestrator broadcasts to all cb- workers: sprint-start, notes, approval tokens, rotations.",
   "type": "object",
-  "required": ["type", "from", "to", "subject"],
+  "required": ["type", "task_id", "from", "to", "subject"],
   "properties": {
     "type": {
       "enum": [
@@ -49,6 +49,10 @@
           }
         }
       }
+    },
+    {
+      "if": { "properties": { "type": { "const": "sprint-start" } }, "required": ["type"] },
+      "then": { "required": ["sprint_id"] }
     }
   ],
   "additionalProperties": false

@@ -38,6 +38,10 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "type": { "const": "task" } }, "required": ["type"] },
+      "then": { "required": ["body"] }
+    },
+    {
       "if": { "properties": { "type": { "const": "contract-change" } }, "required": ["type"] },
       "then": { "required": ["wire_compat"] }
     },

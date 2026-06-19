@@ -10,16 +10,13 @@
         "task",
         "question",
         "note",
-        "approval-token",
-        "approval-revoke",
-        "consent-grant",
-        "consent-deny",
         "rotate"
       ]
     },
     "task_id": {
       "type": "string",
       "minLength": 3,
+      "pattern": "^cb-[0-9]{4}-[0-9]{2}-[0-9]{2}-.+",
       "description": "Format: cb-YYYY-MM-DD-<slug>, e.g. 'cb-2026-06-19-add-tool'."
     },
     "from": {
@@ -51,22 +48,8 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "type": { "const": "approval-token" } }, "required": ["type"] },
-      "then": {
-        "required": ["body"],
-        "properties": {
-          "body": {
-            "type": "object",
-            "required": ["authorized_actions", "env", "scope_workers", "expires_at"],
-            "properties": {
-              "authorized_actions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-              "env": { "type": "string" },
-              "scope_workers": { "type": "array", "minItems": 1 },
-              "expires_at": { "type": "string", "format": "date-time" }
-            }
-          }
-        }
-      }
+      "if": { "properties": { "type": { "const": "task" } }, "required": ["type"] },
+      "then": { "required": ["body"] }
     }
   ],
   "additionalProperties": false
