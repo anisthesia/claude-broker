@@ -7,7 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { readFileSync, mkdirSync, createWriteStream, openSync, closeSync } from "fs";
 
 const PORT               = Number(process.env.PORT)                   || 8080;
@@ -20,6 +20,7 @@ const WATCHDOG_BIN       = process.env.WATCHDOG_BIN                   || "";
 const WORKERS_CONFIG     = process.env.WORKERS_CONFIG                 || "";
 const WORKERS_LOG_DIR    = process.env.WORKERS_LOG_DIR                || "./worker-logs";
 const WORKER_OFFLINE_THRESHOLD_S = Number(process.env.WORKER_OFFLINE_THRESHOLD_S) || 300;
+const WORKERS_TMUX_SESSION       = process.env.WORKERS_TMUX_SESSION               || "";
 
 // Worker definitions loaded from WORKERS_CONFIG JSON file.
 // Format: [{ "name": "backend", "ns": "dv", "args": ["backend"] }, ...]
@@ -299,6 +300,40 @@ function spawnWatchdogProc(def, { model } = {}) {
   watchdogProcs.set(def.name, { pid: proc.pid, proc, startedAt: Date.now() });
   console.log(`[claude-broker] started watchdog "${def.name}" (pid ${proc.pid}) → logs: ${WORKERS_LOG_DIR}/${def.name}.{out,err}.log`);
   return proc;
+}
+
+// ── tmux helpers (used only when WORKERS_TMUX_SESSION is set) ────────────────
+
+function tmuxWindowExists(winName) {
+  try {
+    const r = spawnSync("tmux", ["list-windows", "-t", WORKERS_TMUX_SESSION, "-F", "#{window_name}"], { encoding: "utf8" });
+    return (r.stdout || "").split("\n").some(l => l.trim() === winName);
+  } catch { return false; }
+}
+
+function tmuxPanePid(winName) {
+  try {
+    const r = spawnSync("tmux", ["display-message", "-t", `${WORKERS_TMUX_SESSION}:${winName}`, "-p", "#{pane_pid}"], { encoding: "utf8" });
+    const pid = parseInt((r.stdout || "").trim(), 10);
+    return isNaN(pid) ? null : pid;
+  } catch { return null; }
+}
+
+function spawnWatchdogTmux(def, { model } = {}) {
+  // Ensure target session exists
+  const hasSession = spawnSync("tmux", ["has-session", "-t", WORKERS_TMUX_SESSION], { encoding: "utf8" });
+  if (hasSession.status !== 0) {
+    spawnSync("tmux", ["new-session", "-d", "-s", WORKERS_TMUX_SESSION], { encoding: "utf8" });
+  }
+  const envPrefix = model ? `CLAUDE_MODEL=${model} ` : "";
+  const args = expandArgs(def.args || []);
+  const shellCmd = `${envPrefix}${WATCHDOG_BIN} ${args.map(a => (a.includes(" ") ? `"${a}"` : a)).join(" ")}`;
+  const r = spawnSync("tmux", ["new-window", "-t", WORKERS_TMUX_SESSION, "-n", def.name, shellCmd], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error((r.stderr || "").trim() || "tmux new-window failed");
+  const pid = tmuxPanePid(def.name);
+  watchdogProcs.set(def.name, { pid, startedAt: Date.now(), tmux: true });
+  console.log(`[claude-broker] started watchdog "${def.name}" in tmux ${WORKERS_TMUX_SESSION}:${def.name} (pid ${pid})`);
+  return { pid };
 }
 
 // ── AJV schema validation ─────────────────────────────────────────────────────
@@ -807,10 +842,24 @@ function buildServer() {
   }, async () => {
     if (!workerDefs.length) return { content: [{ type: "text", text: "(no workers configured — set WORKERS_CONFIG)" }] };
     const lines = workerDefs.map(w => {
-      const entry = watchdogProcs.get(w.name);
-      const state = entry
-        ? `running  pid=${entry.pid}  uptime=${Math.floor((Date.now() - entry.startedAt) / 1000)}s`
-        : "stopped";
+      let state;
+      if (WORKERS_TMUX_SESSION) {
+        const exists = tmuxWindowExists(w.name);
+        if (exists) {
+          const pid = tmuxPanePid(w.name);
+          const entry = watchdogProcs.get(w.name);
+          const uptime = entry ? `${Math.floor((Date.now() - entry.startedAt) / 1000)}s` : "?";
+          state = `running  pid=${pid ?? "?"}  uptime=${uptime}  tmux=${WORKERS_TMUX_SESSION}:${w.name}`;
+        } else {
+          watchdogProcs.delete(w.name);
+          state = "stopped";
+        }
+      } else {
+        const entry = watchdogProcs.get(w.name);
+        state = entry
+          ? `running  pid=${entry.pid}  uptime=${Math.floor((Date.now() - entry.startedAt) / 1000)}s`
+          : "stopped";
+      }
       return `${w.name}\t${state}`;
     });
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -830,6 +879,19 @@ function buildServer() {
     const def = workerDefs.find(w => w.name === name);
     if (!def)
       return { content: [{ type: "text", text: `Worker "${name}" not found in config. Use list_workers to see available workers.` }], isError: true };
+    if (WORKERS_TMUX_SESSION) {
+      if (tmuxWindowExists(name)) {
+        const pid = tmuxPanePid(name);
+        return { content: [{ type: "text", text: `Worker "${name}" already running in tmux ${WORKERS_TMUX_SESSION}:${name} (pid ${pid ?? "?"}).` }] };
+      }
+      try {
+        const { pid } = spawnWatchdogTmux(def, { model });
+        const modelNote = model ? ` [model: ${model}]` : "";
+        return { content: [{ type: "text", text: `Started "${name}" in tmux session "${WORKERS_TMUX_SESSION}" window "${name}" (pid ${pid ?? "?"})${modelNote}.` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `Failed to start "${name}" in tmux: ${e.message}` }], isError: true };
+      }
+    }
     if (watchdogProcs.has(name)) {
       const pid = watchdogProcs.get(name).pid;
       return { content: [{ type: "text", text: `Worker "${name}" already running (pid ${pid}).` }] };
@@ -1049,6 +1111,22 @@ function buildServer() {
       name: z.string().min(1).describe("Worker name as defined in WORKERS_CONFIG, e.g. 'backend', 'platform-orch'."),
     },
   }, async ({ name }) => {
+    if (WORKERS_TMUX_SESSION) {
+      if (!tmuxWindowExists(name)) {
+        watchdogProcs.delete(name);
+        return { content: [{ type: "text", text: `Worker "${name}" is not running (no tmux window found in ${WORKERS_TMUX_SESSION}).` }], isError: true };
+      }
+      try {
+        const r = spawnSync("tmux", ["kill-window", "-t", `${WORKERS_TMUX_SESSION}:${name}`], { encoding: "utf8" });
+        if (r.status !== 0) throw new Error((r.stderr || "").trim() || "tmux kill-window failed");
+        watchdogProcs.delete(name);
+        console.log(`[claude-broker] stopped watchdog "${name}" via tmux kill-window`);
+        return { content: [{ type: "text", text: `Stopped "${name}" (killed tmux window ${WORKERS_TMUX_SESSION}:${name}).` }] };
+      } catch (e) {
+        watchdogProcs.delete(name);
+        return { content: [{ type: "text", text: `tmux kill-window failed: ${e.message}` }], isError: true };
+      }
+    }
     const entry = watchdogProcs.get(name);
     if (!entry)
       return { content: [{ type: "text", text: `Worker "${name}" is not running.` }], isError: true };
