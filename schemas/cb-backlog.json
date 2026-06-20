@@ -35,14 +35,16 @@
     {
       "type": "object",
       "title": "Deferred or deferred-resolved",
-      "required": ["type", "task_id", "subject", "body"],
+      "required": ["type", "task_id", "subject"],
       "properties": {
         "type": { "enum": ["deferred", "deferred-resolved"] },
         "task_id": { "type": "string", "minLength": 3 },
         "subject": { "type": "string", "minLength": 3 },
-        "body": { "type": "object" },
+        "body": { "oneOf": [{ "type": "string" }, { "type": "object" }] },
         "from": { "type": "string" },
-        "deferred_reason": { "type": "string" }
+        "to": { "type": "string" },
+        "deferred_reason": { "type": "string" },
+        "resolved_in_sprint": { "type": "string" }
       },
       "additionalProperties": false,
       "allOf": [
