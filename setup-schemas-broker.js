@@ -22,6 +22,7 @@ const REGISTRATIONS = [
   { channel: "cb-control",      file: "schemas/cb-control.json" },
   { channel: "cb-status",       file: "schemas/cb-status.json" },
   { channel: "cb-telemetry",    file: "schemas/cb-telemetry.json" },
+  { channel: "cb-backlog",      file: "schemas/cb-backlog.json" },
 ];
 
 async function main() {

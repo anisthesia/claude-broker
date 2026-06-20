@@ -1,42 +1,71 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "claude-broker cb-backlog envelope",
-  "description": "Persistent deferred task register for cb-namespace. NEVER purge this channel.",
-  "type": "object",
-  "required": ["type", "task_id", "subject"],
-  "properties": {
-    "type": { "enum": ["deferred", "deferred-resolved", "retrospective"] },
-    "task_id": { "type": "string", "minLength": 3 },
-    "from": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Worker or orchestrator that created this entry."
-    },
-    "to": { "type": "string" },
-    "subject": { "type": "string", "minLength": 3 },
-    "body": { "type": "object" },
-    "deferred_reason": { "type": "string" }
-  },
-  "allOf": [
+  "description": "Persistent deferred task register for cb-namespace. NEVER purge this channel. Supports three message shapes: task envelopes, retrospectives, and deferred messages.",
+  "oneOf": [
     {
-      "if": { "properties": { "type": { "const": "deferred" } }, "required": ["type"] },
-      "then": { "required": ["deferred_reason"] }
+      "type": "object",
+      "title": "Task envelope (task, result, note, status, question)",
+      "required": ["type", "task_id", "subject", "body", "from", "to"],
+      "properties": {
+        "type": { "enum": ["task", "result", "note", "status", "question"] },
+        "task_id": { "type": "string", "minLength": 3 },
+        "subject": { "type": "string", "minLength": 3 },
+        "body": { "type": "object" },
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     },
     {
-      "if": { "properties": { "type": { "const": "deferred-resolved" } }, "required": ["type"] },
-      "then": {
-        "properties": {
-          "body": {
-            "type": "object",
-            "required": ["resolved_in_sprint", "outcome"],
+      "type": "object",
+      "title": "Retrospective",
+      "required": ["type", "sprint", "dates", "workers", "tasks"],
+      "properties": {
+        "type": { "const": "retrospective" },
+        "sprint": { "type": "string" },
+        "dates": { "type": "object" },
+        "workers": { "type": "array" },
+        "tasks": { "type": "array" },
+        "key_metrics": { "type": "object" },
+        "backlog_deferred": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "title": "Deferred or deferred-resolved",
+      "required": ["type", "task_id", "subject", "body"],
+      "properties": {
+        "type": { "enum": ["deferred", "deferred-resolved"] },
+        "task_id": { "type": "string", "minLength": 3 },
+        "subject": { "type": "string", "minLength": 3 },
+        "body": { "type": "object" },
+        "from": { "type": "string" },
+        "deferred_reason": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "deferred" } }, "required": ["type"] },
+          "then": { "required": ["deferred_reason"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "deferred-resolved" } }, "required": ["type"] },
+          "then": {
             "properties": {
-              "resolved_in_sprint": { "type": "string" },
-              "outcome": { "enum": ["promoted", "cancelled", "superseded"] }
+              "body": {
+                "type": "object",
+                "required": ["resolved_in_sprint", "outcome"],
+                "properties": {
+                  "resolved_in_sprint": { "type": "string" },
+                  "outcome": { "enum": ["promoted", "cancelled", "superseded"] }
+                }
+              }
             }
           }
         }
-      }
+      ]
     }
-  ],
-  "additionalProperties": false
+  ]
 }
