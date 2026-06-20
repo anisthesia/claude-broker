@@ -260,6 +260,28 @@ async function run() {
   const afterImm = await call(a, "read_messages", { channel: igch, since_id: 0 });
   assert(afterImm.includes("immediate gate"), "post_gated_message: immediately satisfied message visible in channel");
 
+  // ── 8b. post_gated_message race condition regression (core-014) ────────────
+  // core-014 fixed a race where the event listener was registered AFTER
+  // re-checking allSatisfied(), missing results that arrived in that window.
+  // This test ensures that register-before-check pattern stays correct.
+  console.log("\n8b. post_gated_message race condition (core-014)");
+  const rch   = `test-race-${Date.now()}`;
+  const rwsch = `test-race-watch-${Date.now()}`;
+  const rTaskId = `task-race-${Date.now()}`;
+  // Satisfy dependency BEFORE calling post_gated_message
+  await call(a, "send_message", { channel: rwsch, sender: "worker", content: JSON.stringify({ type: "result", task_id: rTaskId, summary: "pre-satisfied" }) });
+  const raceRes = await call(a, "post_gated_message", {
+    channel:       rch,
+    sender:        "test-worker",
+    content:       JSON.stringify({ type: "task", task_id: rTaskId, msg: "race-fix-verification" }),
+    depends_on:    [rTaskId],
+    watch_channel: rwsch,
+    timeout_ms:    5000,
+  });
+  assert(raceRes.includes("All deps satisfied immediately"), "post_gated_message: dependency satisfied before call triggers immediate path");
+  const afterRace = await call(a, "read_messages", { channel: rch, since_id: 0 });
+  assert(afterRace.includes("race-fix-verification"), "post_gated_message: message posted immediately after dependency pre-satisfied");
+
   // ── 9. list_channels includes last_activity ───────────────────────────────
   console.log("\n9. list_channels last_activity");
   const chanList = await call(a, "list_channels", {});
