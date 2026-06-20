@@ -19,7 +19,7 @@ const REGISTRATIONS = [
   { channel: "dv-backend",         file: "schemas/dv-worker-inbox.json",   strict: true },
   { channel: "dv-frontend",        file: "schemas/dv-worker-inbox.json" },
   { channel: "dv-customer-portal", file: "schemas/dv-worker-inbox.json" },
-  { channel: "dv-qa",             file: "schemas/dv-worker-inbox.json", strict: false },
+  { channel: "dv-qa",              file: "schemas/dv-worker-inbox.json", strict: true  },
   { channel: "dv-status",          file: "schemas/dv-status.json",         strict: true },
   { channel: "dv-control",         file: "schemas/dv-control.json",        strict: true },
   { channel: "dv-telemetry",       file: "schemas/dv-telemetry.json",      strict: true },
