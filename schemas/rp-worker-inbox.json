@@ -38,6 +38,20 @@
       "description": "Optional reference to a baseline task for comparison."
     },
     "body": {},
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Checklist of deliverables the worker must confirm before posting type:result."
+    },
+    "ui_verified_instructions": {
+      "type": "string",
+      "description": "Steps to manually verify the UI change in a browser (required when ui_verified is in required_checks)."
+    },
+    "affected_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Files this task is expected to touch."
+    },
     "refs": { "type": "array" }
   },
   "allOf": [

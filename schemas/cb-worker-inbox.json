@@ -44,6 +44,11 @@
       "description": "Checks the worker must run before posting type:result, e.g. ['test', 'committed']."
     },
     "body": {},
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Checklist of deliverables the worker must confirm before posting type:result."
+    },
     "refs": { "type": "array" }
   },
   "allOf": [

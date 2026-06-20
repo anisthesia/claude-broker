@@ -143,14 +143,57 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, taskNoBody);
   expect(/WARN/.test(t), "worker-inbox: type:task missing body → warn", t);
 
-  // 10. Flip to strict; missing task_id rejected
+  // 10. task with acceptance_criteria → accepted, no warn
+  const taskWithCriteria = {
+    type: "task",
+    task_id: "cb-2026-06-20-wi-ac1",
+    from: "orchestrator",
+    to: "core",
+    subject: "implement feature with criteria",
+    body: "do the thing\n\nAcceptance criteria:\n- [ ] feature works\n- [ ] committed",
+    acceptance_criteria: ["feature works", "committed"],
+    required_checks: ["test", "committed"],
+  };
+  t = await send(client, ch, taskWithCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task with acceptance_criteria accepted, no warn", t);
+
+  // 11. task without acceptance_criteria still accepted (field is optional)
+  const taskNoCriteria = {
+    type: "task",
+    task_id: "cb-2026-06-20-wi-ac2",
+    from: "orchestrator",
+    to: "protocol-qa",
+    subject: "baseline run",
+    body: "run node test-v2.js",
+  };
+  t = await send(client, ch, taskNoCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task without acceptance_criteria still accepted (optional)", t);
+
+  // 12. acceptance_criteria with non-string items → warn
+  const taskBadCriteria = {
+    type: "task",
+    task_id: "cb-2026-06-20-wi-ac3",
+    from: "orchestrator",
+    to: "core",
+    subject: "bad criteria type",
+    body: "instructions",
+    acceptance_criteria: [{ step: "not a string" }],
+  };
+  t = await send(client, ch, taskBadCriteria);
+  expect(/WARN/.test(t), "worker-inbox: acceptance_criteria with non-string items → warn", t);
+
+  // 13. Flip to strict; missing task_id rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "worker-inbox: schema re-registered strict");
 
   t = await send(client, ch, missingTaskId);
   expect(/schema validation failed/.test(t), "worker-inbox strict: missing task_id rejected", t);
 
-  // 9. Valid task still accepted in strict
+  // 14. strict: task with acceptance_criteria still accepted
+  t = await send(client, ch, taskWithCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox strict: task with acceptance_criteria accepted", t);
+
+  // 15. Valid task still accepted in strict
   t = await send(client, ch, validTask);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox strict: valid task accepted", t);
 

@@ -68,12 +68,19 @@ Use this envelope shape (JSON string in `content`):
   "subject": "short label",
   "depends_on": ["<other-task_id>:<worker>"],
   "required_checks": ["test", "committed"],
-  "body": "full instructions",
+  "body": "full instructions\n\nAcceptance criteria (ALL must be confirmed before posting type:result):\n- [ ] <specific deliverable 1>\n- [ ] Tests pass\n- [ ] Committed",
+  "acceptance_criteria": [
+    "Each item the worker must explicitly confirm in their result body",
+    "Incomplete item = post type:question, not type:result"
+  ],
   "refs": []
 }
 ```
 
 - `task_id` format: `cb-2026-06-10-validator-strict` (date + slug)
+- **Always include `acceptance_criteria`** and embed it as a checklist at the end of `body`. Workers must confirm every item before posting `type: result`. If incomplete, they post `type: question`.
+- **Verify before closing**: when a result arrives, check that the body explicitly confirms each `acceptance_criteria` item. If any is missing, dispatch a continuation task — do NOT close the ledger entry.
+- **One task = one deliverable.** Never combine a server change with its schema registration in one task. Use `depends_on` to chain.
 - Always include `required_checks`. For code tasks: `["test", "committed"]`.
   For schema-only tasks: `["schema-registered", "smoke-test", "committed"]`.
   For read/advisory tasks: omit `"committed"`.

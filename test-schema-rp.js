@@ -173,14 +173,100 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token with full body accepted", t);
 
-  // 10. Flip to strict; missing task_id → rejected
+  // 10. task with acceptance_criteria → accepted, no warn
+  const taskWithCriteria = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-ac1",
+    from: "orchestrator",
+    to: "api",
+    subject: "implement registration with payment",
+    body: "build the feature\n\nAcceptance criteria:\n- [ ] individual registration works\n- [ ] Razorpay checkout completes\n- [ ] tests pass\n- [ ] committed",
+    acceptance_criteria: ["individual registration works", "Razorpay checkout completes", "tests pass", "committed"],
+    required_checks: ["test", "committed"],
+  };
+  t = await send(client, ch, taskWithCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task with acceptance_criteria accepted, no warn", t);
+
+  // 11. task without acceptance_criteria still accepted (field is optional)
+  const taskNoCriteria = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-ac2",
+    from: "orchestrator",
+    to: "web",
+    subject: "baseline run",
+    body: "run npm test",
+  };
+  t = await send(client, ch, taskNoCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task without acceptance_criteria still accepted (optional)", t);
+
+  // 12. acceptance_criteria with non-string items → warn (schema violation)
+  const taskBadCriteria = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-ac3",
+    from: "orchestrator",
+    to: "api",
+    subject: "bad criteria",
+    body: "instructions",
+    acceptance_criteria: [{ step: "not a string" }],
+  };
+  t = await send(client, ch, taskBadCriteria);
+  expect(/WARN/.test(t), "worker-inbox: acceptance_criteria with non-string items → warn", t);
+
+  // 13. task with ui_verified_instructions → accepted, no warn
+  const taskWithUiInstructions = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-ui1",
+    from: "orchestrator",
+    to: "admin",
+    subject: "update booking form",
+    body: "update the form",
+    required_checks: ["build", "ui_verified"],
+    ui_verified_instructions: "Open /bookings → click New Booking → confirm date picker works",
+  };
+  t = await send(client, ch, taskWithUiInstructions);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task with ui_verified_instructions accepted, no warn", t);
+
+  // 14. task with affected_files → accepted, no warn
+  const taskWithAffectedFiles = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-af1",
+    from: "orchestrator",
+    to: "api",
+    subject: "add Razorpay webhook handler",
+    body: "implement the webhook",
+    affected_files: ["ridepro-api/src/routes/payments.js", "ridepro-api/src/services/razorpay.js"],
+  };
+  t = await send(client, ch, taskWithAffectedFiles);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: task with affected_files accepted, no warn", t);
+
+  // 15. full envelope with all new fields → accepted, no warn
+  const fullEnvelope = {
+    type: "task",
+    task_id: "rp-2026-06-20-wi-full",
+    from: "orchestrator",
+    to: "api",
+    subject: "implement pet owner registration",
+    body: "build registration\n\nAcceptance criteria:\n- [ ] form submits\n- [ ] tests pass\n- [ ] committed",
+    acceptance_criteria: ["form submits", "tests pass", "committed"],
+    required_checks: ["lint", "build", "test", "committed"],
+    affected_files: ["ridepro-api/src/routes/auth.js"],
+    depends_on: [],
+  };
+  t = await send(client, ch, fullEnvelope);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: full envelope with acceptance_criteria + affected_files accepted, no warn", t);
+
+  // 16. Flip to strict; missing task_id → rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "worker-inbox: schema re-registered strict");
 
   t = await send(client, ch, missingTaskId);
   expect(/schema validation failed/.test(t), "worker-inbox strict: missing task_id rejected", t);
 
-  // 11. Valid task still accepted in strict
+  // 17. strict: task with acceptance_criteria still accepted
+  t = await send(client, ch, taskWithCriteria);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox strict: task with acceptance_criteria accepted", t);
+
+  // 18. Valid task still accepted in strict
   t = await send(client, ch, validTask);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox strict: valid task accepted", t);
 

@@ -5,3 +5,4 @@ broker.db-wal
 logs/
 .env
 *.log
+dogsvilla.db

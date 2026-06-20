@@ -72,6 +72,11 @@
       "type": "string",
       "description": "Required when 'ui_verified' appears in required_checks. Exact screen, action, and expected outcome — specific enough that the worker cannot satisfy it by reading code alone. Example: 'Open /dogs/:id → click Award Badge → confirm dropdown shows badge names'."
     },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Checklist of deliverables the worker must confirm before posting type:result."
+    },
     "body": {},
     "refs": { "type": "array" }
   },
