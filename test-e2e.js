@@ -1851,6 +1851,37 @@ async function run() {
     }
   }
 
+  // ── Cleanup test-created channels ──────────────────────────────────────────
+  // List all channels and purge those created during this test run.
+  console.log("\nCleaning up test-created channels...");
+  try {
+    const allChannelsRaw = await call(orch, "list_channels", {});
+    // Parse the response to extract channel names
+    const channelPattern = new RegExp(`^e2e-${RUN}-`);
+    const createdChannels = allChannelsRaw
+      .split("\n")
+      .filter(line => line.trim())
+      .map(line => {
+        // Format: "channel-name (42 messages, latest #999)"
+        const match = line.match(/^(\S+)\s+\(/);
+        return match ? match[1] : null;
+      })
+      .filter(Boolean)
+      .filter(ch => channelPattern.test(ch));
+
+    if (createdChannels.length > 0) {
+      console.log(`  Found ${createdChannels.length} test channels to purge`);
+      for (const ch of createdChannels) {
+        await call(orch, "purge_channel", { channel: ch });
+      }
+      console.log(`  Purged all test channels`);
+    } else {
+      console.log("  No orphan test channels found");
+    }
+  } catch (e) {
+    console.error("  Error during channel cleanup:", e.message);
+  }
+
   // ── Teardown ───────────────────────────────────────────────────────────────
   await tOrch.close();
   await twA.close();
