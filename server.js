@@ -72,6 +72,9 @@ db.exec(`
   );
 `);
 
+// Migration: add version column if absent (safe to run on every startup)
+try { db.exec("ALTER TABLE channel_schemas ADD COLUMN version TEXT DEFAULT NULL"); } catch (_) {}
+
 // ── Prepared statements ───────────────────────────────────────────────────────
 
 const stmtInsert       = db.prepare("INSERT INTO messages (channel, sender, content, created_at) VALUES (?, ?, ?, ?)");
@@ -110,14 +113,14 @@ const stmtCheckResult  = db.prepare(`
     AND json_extract(content, '$.task_id') = ? AND json_extract(content, '$.type') = 'result'
 `);
 
-const stmtSchemaGet    = db.prepare("SELECT channel, schema, strict, updated_at FROM channel_schemas WHERE channel = ?");
+const stmtSchemaGet    = db.prepare("SELECT channel, schema, strict, updated_at, version FROM channel_schemas WHERE channel = ?");
 const stmtSchemaUpsert = db.prepare(`
-  INSERT INTO channel_schemas (channel, schema, strict, updated_at) VALUES (?, ?, ?, ?)
-  ON CONFLICT(channel) DO UPDATE SET schema=excluded.schema, strict=excluded.strict, updated_at=excluded.updated_at
+  INSERT INTO channel_schemas (channel, schema, strict, updated_at, version) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(channel) DO UPDATE SET schema=excluded.schema, strict=excluded.strict, updated_at=excluded.updated_at, version=excluded.version
 `);
 const stmtSchemaDel         = db.prepare("DELETE FROM channel_schemas WHERE channel = ?");
-const stmtSchemaList        = db.prepare("SELECT channel, strict, updated_at FROM channel_schemas ORDER BY channel");
-const stmtSchemaListPrefix  = db.prepare("SELECT channel, strict, updated_at FROM channel_schemas WHERE channel LIKE ? ORDER BY channel");
+const stmtSchemaList        = db.prepare("SELECT channel, strict, updated_at, version FROM channel_schemas ORDER BY channel");
+const stmtSchemaListPrefix  = db.prepare("SELECT channel, strict, updated_at, version FROM channel_schemas WHERE channel LIKE ? ORDER BY channel");
 
 // One-shot migration: purge reg-* test debris
 if (db.prepare("SELECT COUNT(*) AS n FROM channel_schemas WHERE channel LIKE 'reg-%'").get().n > 0) {
@@ -828,17 +831,18 @@ function buildServer() {
       channel: z.string().min(1),
       schema:  z.string().min(2).describe("JSON Schema as a JSON-encoded string."),
       strict:  z.boolean().optional().describe("If true, invalid messages are rejected. Default false (warn-only)."),
+      version: z.string().optional().describe("Optional schema version string, e.g. '1.0'."),
     },
-  }, async ({ channel, schema, strict }) => {
+  }, async ({ channel, schema, strict, version }) => {
     let parsed;
     try { parsed = JSON.parse(schema); }
     catch (e) { return { content: [{ type: "text", text: `schema is not valid JSON: ${e.message}` }], isError: true }; }
     try { ajv.compile(parsed); }
     catch (e) { return { content: [{ type: "text", text: `schema does not compile as JSON Schema: ${e.message}` }], isError: true }; }
     const now = Date.now();
-    stmtSchemaUpsert.run(channel, schema, strict ? 1 : 0, now);
+    stmtSchemaUpsert.run(channel, schema, strict ? 1 : 0, now, version ?? null);
     validatorCache.delete(channel);
-    return { content: [{ type: "text", text: `Registered schema for '${channel}' (strict=${strict ? "on" : "off"}) at ${new Date(now).toISOString()}.` }] };
+    return { content: [{ type: "text", text: `Registered schema for '${channel}' (strict=${strict ? "on" : "off"}${version ? `, version=${version}` : ""}) at ${new Date(now).toISOString()}.` }] };
   });
 
   // ── get_channel_schema ──────────────────────────────────────────────────────
@@ -851,7 +855,8 @@ function buildServer() {
   }, async ({ channel }) => {
     const row = stmtSchemaGet.get(channel);
     if (!row) return { content: [{ type: "text", text: `No schema registered for '${channel}' (free-form).` }] };
-    return { content: [{ type: "text", text: `Channel: ${row.channel}\nStrict: ${row.strict ? "on" : "off (warn-only)"}\nUpdated: ${new Date(row.updated_at).toISOString()}\n\n${row.schema}` }] };
+    const versionLine = row.version != null ? `\nVersion: ${row.version}` : "";
+    return { content: [{ type: "text", text: `Channel: ${row.channel}\nStrict: ${row.strict ? "on" : "off (warn-only)"}${versionLine}\nUpdated: ${new Date(row.updated_at).toISOString()}\n\n${row.schema}` }] };
   });
 
   // ── clear_channel_schema ────────────────────────────────────────────────────
@@ -877,7 +882,7 @@ function buildServer() {
   }, async ({ prefix } = {}) => {
     const rows = prefix ? stmtSchemaListPrefix.all(`${prefix}%`) : stmtSchemaList.all();
     if (rows.length === 0) return { content: [{ type: "text", text: "(no channel schemas registered)" }] };
-    const text = rows.map(r => `${r.channel}\tstrict=${r.strict ? "on" : "off"}\tupdated=${new Date(r.updated_at).toISOString()}`).join("\n");
+    const text = rows.map(r => `${r.channel}\tstrict=${r.strict ? "on" : "off"}\tversion=${r.version ?? "null"}\tupdated=${new Date(r.updated_at).toISOString()}`).join("\n");
     return { content: [{ type: "text", text }] };
   });
 
