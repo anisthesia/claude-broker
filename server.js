@@ -21,6 +21,7 @@ const WORKERS_CONFIG     = process.env.WORKERS_CONFIG                 || "";
 const WORKERS_LOG_DIR    = process.env.WORKERS_LOG_DIR                || "./worker-logs";
 const WORKER_OFFLINE_THRESHOLD_S = Number(process.env.WORKER_OFFLINE_THRESHOLD_S) || 300;
 const WORKERS_TMUX_SESSION       = process.env.WORKERS_TMUX_SESSION               || "";
+const TMUX_BIN                   = process.env.TMUX_BIN                            || "tmux";
 
 // Worker definitions loaded from WORKERS_CONFIG JSON file.
 // Format: [{ "name": "backend", "ns": "dv", "args": ["backend"] }, ...]
@@ -306,14 +307,14 @@ function spawnWatchdogProc(def, { model } = {}) {
 
 function tmuxWindowExists(winName) {
   try {
-    const r = spawnSync("tmux", ["list-windows", "-t", WORKERS_TMUX_SESSION, "-F", "#{window_name}"], { encoding: "utf8" });
+    const r = spawnSync(TMUX_BIN, ["list-windows", "-t", WORKERS_TMUX_SESSION, "-F", "#{window_name}"], { encoding: "utf8" });
     return (r.stdout || "").split("\n").some(l => l.trim() === winName);
   } catch { return false; }
 }
 
 function tmuxPanePid(winName) {
   try {
-    const r = spawnSync("tmux", ["display-message", "-t", `${WORKERS_TMUX_SESSION}:${winName}`, "-p", "#{pane_pid}"], { encoding: "utf8" });
+    const r = spawnSync(TMUX_BIN, ["display-message", "-t", `${WORKERS_TMUX_SESSION}:${winName}`, "-p", "#{pane_pid}"], { encoding: "utf8" });
     const pid = parseInt((r.stdout || "").trim(), 10);
     return isNaN(pid) ? null : pid;
   } catch { return null; }
@@ -321,14 +322,14 @@ function tmuxPanePid(winName) {
 
 function spawnWatchdogTmux(def, { model } = {}) {
   // Ensure target session exists
-  const hasSession = spawnSync("tmux", ["has-session", "-t", WORKERS_TMUX_SESSION], { encoding: "utf8" });
+  const hasSession = spawnSync(TMUX_BIN, ["has-session", "-t", WORKERS_TMUX_SESSION], { encoding: "utf8" });
   if (hasSession.status !== 0) {
-    spawnSync("tmux", ["new-session", "-d", "-s", WORKERS_TMUX_SESSION], { encoding: "utf8" });
+    spawnSync(TMUX_BIN, ["new-session", "-d", "-s", WORKERS_TMUX_SESSION], { encoding: "utf8" });
   }
   const envPrefix = model ? `CLAUDE_MODEL=${model} ` : "";
   const args = expandArgs(def.args || []);
   const shellCmd = `${envPrefix}${WATCHDOG_BIN} ${args.map(a => (a.includes(" ") ? `"${a}"` : a)).join(" ")}`;
-  const r = spawnSync("tmux", ["new-window", "-t", WORKERS_TMUX_SESSION, "-n", def.name, shellCmd], { encoding: "utf8" });
+  const r = spawnSync(TMUX_BIN, ["new-window", "-t", WORKERS_TMUX_SESSION, "-n", def.name, shellCmd], { encoding: "utf8" });
   if (r.status !== 0) throw new Error((r.stderr || "").trim() || "tmux new-window failed");
   const pid = tmuxPanePid(def.name);
   watchdogProcs.set(def.name, { pid, startedAt: Date.now(), tmux: true });
@@ -1117,7 +1118,7 @@ function buildServer() {
         return { content: [{ type: "text", text: `Worker "${name}" is not running (no tmux window found in ${WORKERS_TMUX_SESSION}).` }], isError: true };
       }
       try {
-        const r = spawnSync("tmux", ["kill-window", "-t", `${WORKERS_TMUX_SESSION}:${name}`], { encoding: "utf8" });
+        const r = spawnSync(TMUX_BIN, ["kill-window", "-t", `${WORKERS_TMUX_SESSION}:${name}`], { encoding: "utf8" });
         if (r.status !== 0) throw new Error((r.stderr || "").trim() || "tmux kill-window failed");
         watchdogProcs.delete(name);
         console.log(`[claude-broker] stopped watchdog "${name}" via tmux kill-window`);
