@@ -16,15 +16,15 @@ const SECRET     = process.env.SHARED_SECRET || "";
 const STRICT     = process.env.STRICT === "1";
 
 const REGISTRATIONS = [
-  { channel: "dv-backend",         file: "schemas/dv-worker-inbox.json" },
+  { channel: "dv-backend",         file: "schemas/dv-worker-inbox.json",   strict: true },
   { channel: "dv-frontend",        file: "schemas/dv-worker-inbox.json" },
   { channel: "dv-customer-portal", file: "schemas/dv-worker-inbox.json" },
-  { channel: "dv-status",          file: "schemas/dv-status.json" },
-  { channel: "dv-control",         file: "schemas/dv-control.json" },
-  { channel: "dv-telemetry",       file: "schemas/dv-telemetry.json" },
-  { channel: "dv-backlog",         file: "schemas/dv-backlog.json" },
-  { channel: "dv-intel-status",    file: "schemas/dv-cluster-status.json" },
-  { channel: "dv-platform-status", file: "schemas/dv-cluster-status.json" },
+  { channel: "dv-status",          file: "schemas/dv-status.json",         strict: true },
+  { channel: "dv-control",         file: "schemas/dv-control.json",        strict: true },
+  { channel: "dv-telemetry",       file: "schemas/dv-telemetry.json",      strict: true },
+  { channel: "dv-backlog",         file: "schemas/dv-backlog.json",        strict: true },
+  { channel: "dv-intel-status",    file: "schemas/dv-cluster-status.json", strict: true },
+  { channel: "dv-platform-status", file: "schemas/dv-cluster-status.json", strict: true },
 ];
 
 async function main() {
@@ -38,11 +38,12 @@ async function main() {
   console.log(`[setup] mode:   ${STRICT ? "STRICT (reject invalid)" : "warn-only (log but allow)"}`);
   console.log();
 
-  for (const { channel, file } of REGISTRATIONS) {
+  for (const { channel, file, strict } of REGISTRATIONS) {
     const schema = readFileSync(file, "utf-8");
+    const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: STRICT },
+      arguments: { channel, schema, strict: strictMode },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(22)} ← ${file}`);
