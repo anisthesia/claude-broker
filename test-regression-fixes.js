@@ -190,8 +190,8 @@ async function run() {
       assert(r.status === 400, `REST 400 for channel with control char ${JSON.stringify(bad)}`, `status=${r.status}`);
     }
 
-    // Valid names must still pass
-    const validNames = ["dv-status", "my.channel.v2", "ns_backend-2026-06-09", "αβγ"];
+    // Valid names must still pass — use test-scoped names to avoid writing to production channels
+    const validNames = [ch("dv-status"), `my.channel.${RUN}`, `ns_backend-${RUN}`, `αβγ-${RUN}`];
     for (const good of validNames) {
       const res = await callRaw(a, "send_message", {
         channel: good,
@@ -500,9 +500,9 @@ async function run() {
   // Teardown
   // ─────────────────────────────────────────────────────────────────────────────
 
-  // afterAll: prefix-based sweep + individual channels created by Fix B valid-name test
+  // afterAll: prefix-based sweep covers all ch() channels; clean up Fix B valid-name test channels
   try { await call(a, "purge_channels_by_prefix", { prefix: "reg-" }); } catch (e) { /* best-effort */ }
-  for (const c of ["αβγ", "my.channel.v2", "ns_backend-2026-06-09"]) {
+  for (const c of [`my.channel.${RUN}`, `ns_backend-${RUN}`, `αβγ-${RUN}`]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   await ta.close();
