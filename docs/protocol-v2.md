@@ -550,6 +550,40 @@ As of sprint-016, **all 36 channels** across all active namespaces are strict-va
 
 `test-v2.js` now covers all **29 MCP tools** with **167 assertions** (added Section 19 in sprint-017, task `cb-2026-06-20-pqa-035`).
 
+---
+
+## depends_on Self-Healing
+
+When a worker's task has a `depends_on` prerequisite, it must not blindly wait for the result — if the prerequisite worker is stopped, the wait will time out after 270s with nothing to show for it.
+
+### Self-healing rule
+
+Before waiting for a `depends_on` prerequisite:
+
+1. Call `list_workers` — check if the prerequisite worker is running.
+2. If stopped: call `start_worker(name=<worker>)` immediately — do not wait 270s first.
+3. Then poll for the prerequisite result:
+   `wait_for_messages(channel=<status_channel>, filter_type="result", timeout_ms=300000)`
+4. If still not found after 300s: post `type: question` to the status channel and stay alive — do not exit.
+
+Workers **MUST NOT** exit on `depends_on` timeout. Exit only after posting a `type: question` escalation. The orchestrator will answer the question in the next turn.
+
+### Orchestrator response to type:question with depends_on
+
+When the orchestrator receives a `type: question` with subject containing "depends_on" or "blocked":
+
+1. Call `list_workers` — if the prerequisite worker is stopped, call `start_worker` immediately.
+2. If the prerequisite is running but the result is still missing: investigate whether the task was dispatched and whether the worker needs a re-dispatch.
+3. Post a `type: note` or `type: task` to unblock the waiting worker.
+
+### Background
+
+Root cause incident (2026-06-20, dogsvilla): three workers (dv-qa, dv-backend-services, dv-customer-portal) were blocked on `depends_on` for hours because the prerequisite worker (dv-qa) had been stopped and nobody detected it. The 270s wait_for_messages timeout expired repeatedly without resolution until human intervention.
+
+Utility script: `node check-worker-health.js` detects stopped workers with pending inbox tasks. Run with `--fix` to auto-start them.
+
+---
+
 ## Open questions
 
 - **Heartbeat compaction.** At 90s cadence × 4 workers × multi-hour sprint,

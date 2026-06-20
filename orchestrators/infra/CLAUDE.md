@@ -51,6 +51,15 @@ At the start of every user turn, before doing anything else:
 4. Update task ledger from any `type: result` or `type: status` messages found
 5. If any worker posted `type: question` addressed to you, answer it first —
    that worker is blocked
+6. Client worker health check (run when any dv-/rp-/dx- sprint is active):
+   a. `read_messages` on `dv-status` and `rp-status` (since last seen id) — look for
+      `type: question` with subject containing "depends_on" or "blocked"
+   b. For each such question: call `list_workers` — if the prerequisite worker is
+      stopped, call `start_worker` immediately
+   c. If the prerequisite is running but the result is still missing: investigate —
+      re-dispatch the prerequisite task as needed
+   Utility: `node check-worker-health.js` lists all stopped workers with pending inbox
+   tasks. Run with `--fix` to auto-start them.
 
 On first turn of a fresh session, use `since_id=0` for all channels. Remember
 the highest id seen per channel and persist it across turns.
