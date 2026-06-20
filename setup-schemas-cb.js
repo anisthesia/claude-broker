@@ -16,14 +16,16 @@ const SECRET     = process.env.SHARED_SECRET || "";
 const STRICT     = process.env.STRICT === "1";
 
 // Worker inboxes (core + protocol-qa) share the worker-inbox schema
+// strict: true  — flip confirmed clean (zero violations in sprint-008 assessment)
+// strict: false — held: schema mismatches or recent violations detected
 const REGISTRATIONS = [
-  { channel: "cb-core",         file: "schemas/cb-worker-inbox.json" },
-  { channel: "cb-protocol-qa",  file: "schemas/cb-worker-inbox.json" },
-  { channel: "cb-orchestrator", file: "schemas/cb-orchestrator-inbox.json" },
-  { channel: "cb-control",      file: "schemas/cb-control.json" },
-  { channel: "cb-status",       file: "schemas/cb-status.json" },
-  { channel: "cb-telemetry",    file: "schemas/cb-telemetry.json" },
-  { channel: "cb-backlog",      file: "schemas/cb-backlog.json" },
+  { channel: "cb-core",         file: "schemas/cb-worker-inbox.json",      strict: true },
+  { channel: "cb-protocol-qa",  file: "schemas/cb-worker-inbox.json",      strict: true },
+  { channel: "cb-orchestrator", file: "schemas/cb-orchestrator-inbox.json", strict: true },
+  { channel: "cb-control",      file: "schemas/cb-control.json",           strict: true },
+  { channel: "cb-telemetry",    file: "schemas/cb-telemetry.json",         strict: true },
+  { channel: "cb-status",       file: "schemas/cb-status.json",            strict: false },
+  { channel: "cb-backlog",      file: "schemas/cb-backlog.json",           strict: false },
 ];
 
 async function main() {
@@ -37,11 +39,12 @@ async function main() {
   console.log(`[setup-cb] mode:   ${STRICT ? "STRICT (reject invalid)" : "warn-only (log but allow)"}`);
   console.log();
 
-  for (const { channel, file } of REGISTRATIONS) {
+  for (const { channel, file, strict } of REGISTRATIONS) {
     const schema = readFileSync(file, "utf-8");
+    const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: STRICT },
+      arguments: { channel, schema, strict: strictMode },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(18)} ← ${file}`);
