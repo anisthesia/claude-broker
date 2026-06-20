@@ -54,6 +54,20 @@
       "enum": ["additive", "breaking"],
       "description": "Required on type:contract-change."
     },
+    "affected_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional list of files expected to change, provided by the orchestrator for context."
+    },
+    "require_module_baseline": {
+      "type": "boolean",
+      "description": "When true, worker must run module tests before any code changes and record baseline pass count."
+    },
+    "baseline_task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional reference to a prior baseline task whose results apply to this task."
+    },
     "ui_verified_instructions": {
       "type": "string",
       "description": "Required when 'ui_verified' appears in required_checks. Exact screen, action, and expected outcome — specific enough that the worker cannot satisfy it by reading code alone. Example: 'Open /dogs/:id → click Award Badge → confirm dropdown shows badge names'."
