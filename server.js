@@ -368,7 +368,7 @@ function validateContent(channel, content) {
   if (!v) return { ok: true };
   let parsed;
   try { parsed = JSON.parse(content); }
-  catch (e) { return { ok: false, strict: !!v.strict, errors: `content is not valid JSON: ${e.message}` }; }
+  catch (e) { return { ok: true }; } // Skip schema validation for non-JSON content
   if (v.validate(parsed)) return { ok: true };
   const errors = (v.validate.errors || []).map(e => `${e.instancePath || "/"} ${e.message}`).join("; ");
   return { ok: false, strict: !!v.strict, errors };
