@@ -27,7 +27,7 @@ const REGISTRATIONS = [
   { channel: "dv-sprint-retrospective", file: "schemas/dv-backlog.json",   strict: true },
   { channel: "dv-intel-status",    file: "schemas/dv-cluster-status.json", strict: true },
   { channel: "dv-platform-status", file: "schemas/dv-cluster-status.json", strict: true },
-  { channel: "dv-consumer-status", file: "schemas/dv-cluster-status.json", strict: false },
+  { channel: "dv-consumer-status", file: "schemas/dv-cluster-status.json", strict: true },
 ];
 
 async function main() {
