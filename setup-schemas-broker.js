@@ -40,7 +40,7 @@ async function main() {
     const schema = readFileSync(file, "utf-8");
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: STRICT },
+      arguments: { channel, schema, strict: STRICT, version: "1.0" },
     });
     const text = res.content?.[0]?.text ?? JSON.stringify(res);
     const ok = !res.isError;

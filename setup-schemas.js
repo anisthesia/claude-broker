@@ -45,7 +45,7 @@ async function main() {
     const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: strictMode },
+      arguments: { channel, schema, strict: strictMode, version: "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(22)} ← ${file}`);

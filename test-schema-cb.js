@@ -44,11 +44,13 @@ async function send(client, channel, content) {
   return r.content?.[0]?.text ?? "";
 }
 
-async function registerSchema(client, channel, file, strict) {
+async function registerSchema(client, channel, file, strict, version) {
   const schema = readFileSync(file, "utf-8");
+  const args = { channel, schema, strict };
+  if (version !== undefined) args.version = version;
   const r = await client.callTool({
     name: "register_channel_schema",
-    arguments: { channel, schema, strict },
+    arguments: args,
   });
   return r;
 }
@@ -530,6 +532,31 @@ async function testBacklog(client) {
   await clearSchema(client, ch);
 }
 
+// ─── schema versioning ───────────────────────────────────────────────────────
+
+async function testSchemaVersioning(client) {
+  console.log("\n── schema versioning ──");
+  const file = "schemas/cb-worker-inbox.json";
+  const ch1 = `cb-ver1-test-${RUN_TAG}`;
+  const ch2 = `cb-ver2-test-${RUN_TAG}`;
+  let r;
+
+  // register with version: '1.0' → response and get_channel_schema both show version
+  r = await registerSchema(client, ch1, file, false, "1.0");
+  expect(/version=1\.0/.test(r.content?.[0]?.text ?? ""), "versioning: register with version='1.0' confirmed in response", r.content?.[0]?.text);
+
+  r = await client.callTool({ name: "get_channel_schema", arguments: { channel: ch1 } });
+  expect(/Version: 1\.0/.test(r.content?.[0]?.text ?? ""), "versioning: get_channel_schema returns Version: 1.0", r.content?.[0]?.text?.split("\n")?.[2]);
+
+  // register without version → no Version line in get_channel_schema
+  r = await registerSchema(client, ch2, file, false);
+  r = await client.callTool({ name: "get_channel_schema", arguments: { channel: ch2 } });
+  expect(!/Version:/.test(r.content?.[0]?.text ?? ""), "versioning: register without version → no Version line in output", r.content?.[0]?.text?.split("\n")?.[2]);
+
+  await clearSchema(client, ch1);
+  await clearSchema(client, ch2);
+}
+
 // ─── setup-schemas-broker.js idempotent re-run ──────────────────────────────
 
 async function testSetupIdempotency() {
@@ -575,6 +602,7 @@ async function main() {
   await testStatus(client);
   await testTelemetry(client);
   await testBacklog(client);
+  await testSchemaVersioning(client);
 
   await transport.close();
 

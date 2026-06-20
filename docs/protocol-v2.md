@@ -463,12 +463,42 @@ Key cb-* schema constraints:
 - **Cost telemetry becomes a first-class observable** instead of an
   after-the-fact 4800-row JSONL crunch.
 
+## Schema Versioning
+
+Schema versions are tracked with the `version` field on `register_channel_schema`.
+All schemas registered by the setup scripts carry `version: "1.0"` as of sprint-011
+(2026-06-20, task `cb-2026-06-20-pqa-023`).
+
+### Baseline
+
+All channels in `cb-*`, `dv-*`, `rp-*`, and `dx-*` namespaces are stamped `version: 1.0`.
+
+Verify via `get_channel_schema`:
+```
+Channel: cb-status
+Strict: on
+Version: 1.0
+Updated: 2026-06-20T05:59:55.807Z
+```
+
+### Versioning convention
+
+| Change type | Version bump |
+|---|---|
+| Add optional field | none (backwards-compatible) |
+| Add required field | minor bump (e.g. `1.0` → `1.1`) |
+| Remove field or change type | major bump (e.g. `1.0` → `2.0`) |
+| Tighten an `enum` or `pattern` | major bump |
+
+Schema updates mid-sprint require a sprint boundary: workers that sent messages
+under the old schema may fail validation against the new schema. The chosen
+approach is (b) — schema updates land at sprint start, not mid-flight.
+
+When bumping, re-run the relevant `setup-schemas-*.js` script with the new
+version string and file the change under the sprint's protocol-qa result.
+
 ## Open questions
 
-- **Schema versioning.** When a schema changes mid-sprint, old in-flight
-  messages may not validate. Either (a) make schemas append-only with a
-  `valid_from_id` column, or (b) accept that schema updates require a
-  sprint boundary. Current spec leans (b) for simplicity.
 - **Heartbeat compaction.** At 90s cadence × 4 workers × multi-hour sprint,
   `dv-telemetry` will accumulate hundreds of messages. Purge-at-sprint-start
   handles freshness but the orchestrator's `read_messages` will return a
