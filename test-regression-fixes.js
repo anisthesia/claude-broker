@@ -500,6 +500,11 @@ async function run() {
   // Teardown
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // afterAll: prefix-based sweep + individual channels created by Fix B valid-name test
+  try { await call(a, "purge_channels_by_prefix", { prefix: "reg-" }); } catch (e) { /* best-effort */ }
+  for (const c of ["αβγ", "my.channel.v2", "ns_backend-2026-06-09"]) {
+    await call(a, "purge_channel", { channel: c }).catch(() => {});
+  }
   await ta.close();
   await tb.close();
 

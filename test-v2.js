@@ -614,6 +614,8 @@ async function run() {
   for (const c of [ssch, ssch2]) {
     await call(a, "clear_channel_schema", { channel: c }).catch(() => {});
   }
+  // afterAll: prefix-based sweep catches any channels missed above
+  try { await call(a, "purge_channels_by_prefix", { prefix: "test-" }); } catch (e) { /* best-effort */ }
   await ta.close();
   await tb.close();
 

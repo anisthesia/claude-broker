@@ -860,6 +860,8 @@ async function run() {
   }
 
   // ── Teardown ──────────────────────────────────────────────────────────────────
+  // afterAll: prefix-based sweep catches all fix-${RUN}-* channels
+  try { await call(a, "purge_channels_by_prefix", { prefix: "fix-" }); } catch (e) { /* best-effort */ }
   await ta.close();
   await tb.close();
 
