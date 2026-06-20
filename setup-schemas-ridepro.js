@@ -16,18 +16,28 @@ const SECRET     = process.env.SHARED_SECRET || "";
 const STRICT     = process.env.STRICT === "1";
 
 // 6 worker inboxes share the worker-inbox schema; orchestrator, status, control, telemetry, backlog are distinct
+//
+// strict column: per-channel flip status as of 2026-06-20.
+//   STRICT=1 env var overrides all to strict.
+//   Channels held warn-only due to known violations:
+//     rp-admin      — task_id uppercase P3, missing date in mod-P3-001; baseline_task_id extra prop; depends_on items fail pattern
+//     rp-ios        — same task_id/depends_on pattern failures + baseline_task_id extra prop
+//     rp-qa         — qa-phase3-verify-2026-06-20 missing suffix after date (fails pattern)
+//     rp-backlog    — deferred-resolved uses promoted_sprint/promoted_at instead of required resolved_in_sprint/outcome
+//     rp-status     — most type:result missing consent_basis; results with commits missing affected_files
+//     rp-telemetry  — activity.state "idle-exit" not in allowed enum
 const REGISTRATIONS = [
-  { channel: "rp-api",          file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-admin",        file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-web",          file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-android",      file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-ios",          file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-qa",           file: "schemas/rp-worker-inbox.json" },
-  { channel: "rp-orchestrator", file: "schemas/rp-orchestrator-inbox.json" },
-  { channel: "rp-status",       file: "schemas/rp-status.json" },
-  { channel: "rp-control",      file: "schemas/rp-control.json" },
-  { channel: "rp-telemetry",    file: "schemas/rp-telemetry.json" },
-  { channel: "rp-backlog",      file: "schemas/rp-backlog.json" },
+  { channel: "rp-api",          file: "schemas/rp-worker-inbox.json",       strict: true  },
+  { channel: "rp-admin",        file: "schemas/rp-worker-inbox.json",       strict: false },
+  { channel: "rp-web",          file: "schemas/rp-worker-inbox.json",       strict: true  },
+  { channel: "rp-android",      file: "schemas/rp-worker-inbox.json",       strict: true  },
+  { channel: "rp-ios",          file: "schemas/rp-worker-inbox.json",       strict: false },
+  { channel: "rp-qa",           file: "schemas/rp-worker-inbox.json",       strict: false },
+  { channel: "rp-orchestrator", file: "schemas/rp-orchestrator-inbox.json", strict: true  },
+  { channel: "rp-status",       file: "schemas/rp-status.json",             strict: false },
+  { channel: "rp-control",      file: "schemas/rp-control.json",            strict: true  },
+  { channel: "rp-telemetry",    file: "schemas/rp-telemetry.json",          strict: false },
+  { channel: "rp-backlog",      file: "schemas/rp-backlog.json",            strict: false },
 ];
 
 async function main() {
@@ -41,14 +51,15 @@ async function main() {
   console.log(`[setup-ridepro] mode:   ${STRICT ? "STRICT (reject invalid)" : "warn-only (log but allow)"}`);
   console.log();
 
-  for (const { channel, file } of REGISTRATIONS) {
+  for (const { channel, file, strict: perChannelStrict } of REGISTRATIONS) {
     const schema = readFileSync(file, "utf-8");
+    const strictMode = STRICT || perChannelStrict;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: STRICT },
+      arguments: { channel, schema, strict: strictMode },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
-    console.log(`  ${channel.padEnd(18)} ← ${file}`);
+    console.log(`  ${channel.padEnd(18)} [${strictMode ? "strict" : "warn  "}] ← ${file}`);
     console.log(`    ${text}`);
   }
 
