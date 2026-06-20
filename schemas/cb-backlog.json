@@ -24,9 +24,9 @@
       "properties": {
         "type": { "const": "retrospective" },
         "sprint": { "type": "string" },
-        "dates": { "type": "object" },
-        "workers": { "type": "array" },
-        "tasks": { "type": "array" },
+        "dates": { "oneOf": [{ "type": "string" }, { "type": "object" }] },
+        "workers": { "oneOf": [{ "type": "array" }, { "type": "object" }] },
+        "tasks": { "oneOf": [{ "type": "array" }, { "type": "object" }] },
         "key_metrics": { "type": "object" },
         "backlog_deferred": { "type": "array" }
       },

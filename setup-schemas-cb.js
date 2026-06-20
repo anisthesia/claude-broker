@@ -24,8 +24,8 @@ const REGISTRATIONS = [
   { channel: "cb-orchestrator", file: "schemas/cb-orchestrator-inbox.json", strict: true },
   { channel: "cb-control",      file: "schemas/cb-control.json",           strict: true },
   { channel: "cb-telemetry",    file: "schemas/cb-telemetry.json",         strict: true },
-  { channel: "cb-status",       file: "schemas/cb-status.json",            strict: false },
-  { channel: "cb-backlog",      file: "schemas/cb-backlog.json",           strict: false },
+  { channel: "cb-status",       file: "schemas/cb-status.json",            strict: true },
+  { channel: "cb-backlog",      file: "schemas/cb-backlog.json",           strict: true },
 ];
 
 async function main() {

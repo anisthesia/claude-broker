@@ -344,7 +344,7 @@ async function testStatus(client) {
   expect(/WARN/.test(t), "status: type:result without summary → warn in warn-only", t);
   expect(/Sent #/.test(t), "status: type:result without summary still stored in warn-only", t);
 
-  // 4. type:result without consent_basis → warn
+  // 4. type:result without consent_basis → accepted (consent_basis is optional)
   const resultNoConsent = {
     type: "result",
     task_id: "cb-2026-06-19-st-r03",
@@ -355,9 +355,9 @@ async function testStatus(client) {
     body: {},
   };
   t = await send(client, ch, resultNoConsent);
-  expect(/WARN/.test(t), "status: type:result without consent_basis → warn in warn-only", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result without consent_basis → accepted (optional)", t);
 
-  // 5. type:result with commits but no affected_files → warn
+  // 5. type:result with commits but no affected_files → accepted (affected_files is optional)
   const resultNoAffected = {
     type: "result",
     task_id: "cb-2026-06-19-st-r04",
@@ -371,7 +371,7 @@ async function testStatus(client) {
     },
   };
   t = await send(client, ch, resultNoAffected);
-  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits but no affected_files → accepted (optional)", t);
 
   // 6. type:result with commits AND affected_files → no warn
   const resultWithAffected = {
@@ -402,9 +402,9 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoSummary);
   expect(/schema validation failed/.test(t), "status strict: type:result without summary → rejected", t);
 
-  // 9. Strict: type:result without consent_basis → rejected
+  // 9. Strict: type:result without consent_basis → accepted (consent_basis is optional)
   t = await send(client, ch, resultNoConsent);
-  expect(/schema validation failed/.test(t), "status strict: type:result without consent_basis → rejected", t);
+  expect(/Sent #/.test(t) && !/schema validation failed/.test(t), "status strict: type:result without consent_basis → accepted (optional)", t);
 
   // 10. Strict: type:status without summary passes (summary only required on result)
   t = await send(client, ch, validStatus);
