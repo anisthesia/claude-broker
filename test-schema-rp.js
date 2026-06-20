@@ -321,7 +321,7 @@ async function testStatus(client) {
   expect(/WARN/.test(t), "status: type:result without summary → warn in warn-only", t);
   expect(/Sent #/.test(t), "status: type:result without summary still stored in warn-only", t);
 
-  // 4. type:result with production_touching=true but no consent_basis → warn
+  // 4. type:result with production_touching=true but no consent_basis → accepted (consent_basis now optional)
   const resultNoConsent = {
     type: "result",
     task_id: "rp-2026-06-19-st-r03",
@@ -332,7 +332,7 @@ async function testStatus(client) {
     body: { production_touching: true },
   };
   t = await send(client, ch, resultNoConsent);
-  expect(/WARN/.test(t), "status: type:result production_touching=true without consent_basis → warn", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true without consent_basis → accepted", t);
 
   // 5. type:result with production_touching=true AND consent_basis → no warn
   const resultWithConsent = {
@@ -347,7 +347,7 @@ async function testStatus(client) {
   t = await send(client, ch, resultWithConsent);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true with consent_basis accepted", t);
 
-  // 5a. type:result without consent_basis (no production_touching) → warn
+  // 5a. type:result without consent_basis (no production_touching) → accepted (consent_basis now optional)
   const resultNoConsentNoPT = {
     type: "result",
     task_id: "rp-2026-06-19-st-r05a",
@@ -358,9 +358,9 @@ async function testStatus(client) {
     body: {},
   };
   t = await send(client, ch, resultNoConsentNoPT);
-  expect(/WARN/.test(t), "status: type:result without consent_basis → warn in warn-only", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result without consent_basis → accepted", t);
 
-  // 5b. type:result with non-empty commits but no affected_files → warn
+  // 5b. type:result with non-empty commits but no affected_files → accepted (affected_files now optional)
   const resultCommitsNoAffected = {
     type: "result",
     task_id: "rp-2026-06-19-st-r05b",
@@ -374,7 +374,7 @@ async function testStatus(client) {
     },
   };
   t = await send(client, ch, resultCommitsNoAffected);
-  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits but no affected_files → accepted", t);
 
   // 6. Valid handoff → no warn
   const validHandoff = {
@@ -400,9 +400,9 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoSummary);
   expect(/schema validation failed/.test(t), "status strict: type:result without summary → rejected", t);
 
-  // 9. Strict: type:result with production_touching=true but no consent_basis → rejected
+  // 9. Strict: type:result with production_touching=true but no consent_basis → accepted (consent_basis now optional)
   t = await send(client, ch, resultNoConsent);
-  expect(/schema validation failed/.test(t), "status strict: type:result production_touching=true without consent_basis → rejected", t);
+  expect(/Sent #/.test(t) && !/schema validation failed/.test(t), "status strict: type:result production_touching=true without consent_basis → accepted", t);
 
   // 10. Strict: type:status without summary passes (summary only required on result)
   t = await send(client, ch, validStatus);
@@ -644,7 +644,7 @@ async function testBacklog(client) {
   t = await send(client, ch, validResolved);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "backlog: valid deferred-resolved with full body accepted", t);
 
-  // 3. deferred-resolved without body.outcome → warn
+  // 3. deferred-resolved without body.outcome → accepted (outcome now optional)
   const resolvedNoOutcome = {
     type: "deferred-resolved",
     task_id: "rp-2026-06-19-bl-002",
@@ -652,9 +652,9 @@ async function testBacklog(client) {
     body: { resolved_in_sprint: "rp-sprint-003" },
   };
   t = await send(client, ch, resolvedNoOutcome);
-  expect(/WARN/.test(t), "backlog: deferred-resolved without outcome → warn in warn-only", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "backlog: deferred-resolved without outcome → accepted", t);
 
-  // 4. deferred-resolved without body.resolved_in_sprint → warn
+  // 4. deferred-resolved without body.resolved_in_sprint → accepted (resolved_in_sprint now optional)
   const resolvedNoSprint = {
     type: "deferred-resolved",
     task_id: "rp-2026-06-19-bl-003",
@@ -662,7 +662,7 @@ async function testBacklog(client) {
     body: { outcome: "cancelled" },
   };
   t = await send(client, ch, resolvedNoSprint);
-  expect(/WARN/.test(t), "backlog: deferred-resolved without resolved_in_sprint → warn in warn-only", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "backlog: deferred-resolved without resolved_in_sprint → accepted", t);
 
   // 5. Unknown type → warn
   const unknownType = {
@@ -683,12 +683,12 @@ async function testBacklog(client) {
   t = await send(client, ch, missingSubject);
   expect(/WARN/.test(t), "backlog: missing subject → warn in warn-only", t);
 
-  // 8. Strict: deferred-resolved without outcome → rejected
+  // 8. Strict: deferred-resolved without outcome → accepted (outcome now optional)
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "backlog: schema re-registered strict");
 
   t = await send(client, ch, resolvedNoOutcome);
-  expect(/schema validation failed/.test(t), "backlog strict: deferred-resolved without outcome → rejected", t);
+  expect(/Sent #/.test(t) && !/schema validation failed/.test(t), "backlog strict: deferred-resolved without outcome → accepted", t);
 
   // 9. Strict: valid deferred accepted
   t = await send(client, ch, validDeferred);
