@@ -574,32 +574,47 @@ function buildServer() {
 
     return new Promise((resolve) => {
       let timer = null;
+      let settled = false;
 
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onResult);
       }
 
-      function onResult() {
-        if (!allSatisfied()) return; // Still waiting on some deps
+      function settle(result) {
+        if (settled) return;
+        settled = true;
         cleanup();
+        resolve(result);
+      }
+
+      function tryPost() {
         const check = validateContent(channel, content);
         if (!check.ok && check.strict) {
-          resolve({ content: [{ type: "text", text: `Deps satisfied but schema validation failed: ${check.errors}` }], isError: true });
+          settle({ content: [{ type: "text", text: `Deps satisfied but schema validation failed: ${check.errors}` }], isError: true });
           return;
         }
         const now = Date.now();
         const r = stmtInsert.run(channel, sender, content, now);
         messageBus.emit(`msg:${channel}`, { id: r.lastInsertRowid, sender, content });
-        resolve({ content: [{ type: "text", text: `Deps satisfied. Sent #${r.lastInsertRowid} to '${channel}'.` }] });
+        settle({ content: [{ type: "text", text: `Deps satisfied. Sent #${r.lastInsertRowid} to '${channel}'.` }] });
       }
 
-      timer = setTimeout(() => {
-        cleanup();
-        resolve({ content: [{ type: "text", text: `Timed out after ${timeout}ms waiting for deps: ${pendingList().join(", ")}` }], isError: true });
-      }, timeout);
+      function onResult() {
+        if (!allSatisfied()) return;
+        tryPost();
+      }
 
+      // Register listener BEFORE re-check so no result event is missed between
+      // the initial allSatisfied() check above and this listener registration.
       messageBus.on(event, onResult);
+
+      // Re-check now that listener is wired (mirrors wait_for_messages pattern).
+      if (allSatisfied()) { tryPost(); return; }
+
+      timer = setTimeout(() => {
+        settle({ content: [{ type: "text", text: `Timed out after ${timeout}ms waiting for deps: ${pendingList().join(", ")}` }], isError: true });
+      }, timeout);
     });
   });
 
@@ -1928,6 +1943,9 @@ if (SHARED_SECRET) {
 }
 
 app.post("/mcp", async (req, res) => {
+  // Disable socket inactivity timeout so long-polling tools (wait_for_messages up to 300s)
+  // don't get dropped mid-call by Node.js's default socket timeout.
+  req.socket.setTimeout(0);
   try {
     const server    = buildServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -1940,7 +1958,9 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`[claude-broker] v2.0.0 listening on :${PORT}  auth:${SHARED_SECRET ? "on" : "OFF"}  prune:${PRUNE_MAX_AGE_MS / 3600000}h  exempt:[${PRUNE_EXEMPT.join(",")}]`);
   console.log(`[claude-broker] dashboard: http://localhost:${PORT}/dashboard`);
 });
+// Disable server-level request timeout: long-poll tools can legitimately take up to 300s.
+httpServer.requestTimeout = 0;
