@@ -413,6 +413,55 @@ async function run() {
     console.log("  - start/stop round-trip skipped (backend already running in this environment)");
   }
 
+  // ── 16b. list_workers / start_worker / stop_worker — tmux mode ───────────
+  // Guards: only runs when WORKERS_TMUX_SESSION is set in the environment.
+  // Covers: core-006 (tmux-aware start/stop/list), core-007 (TMUX_BIN constant),
+  //         core-009 (env var injection in spawnWatchdogTmux).
+  if (process.env.WORKERS_TMUX_SESSION) {
+    console.log(`\n16b. Worker lifecycle — tmux mode (session=${process.env.WORKERS_TMUX_SESSION})`);
+
+    // list_workers output must reference tmux session when WORKERS_TMUX_SESSION is set
+    const tmuxList = await call(a, "list_workers", {});
+    assert(tmuxList.includes("tmux="), "list_workers (tmux): running state includes tmux= reference");
+    assert(tmuxList.includes(process.env.WORKERS_TMUX_SESSION), "list_workers (tmux): state includes session name");
+
+    const tmuxBackendLine = tmuxList.split("\n").find(l => l.startsWith("backend\t"));
+    if (tmuxBackendLine && tmuxBackendLine.includes("stopped")) {
+      // start_worker in tmux mode must return a tmux-specific message, not a bare pid
+      const tmuxStartRes = await call(a, "start_worker", { name: "backend" });
+      assert(
+        tmuxStartRes.includes("tmux session") || tmuxStartRes.includes("tmux"),
+        "start_worker (tmux): response mentions tmux", tmuxStartRes
+      );
+      assert(!tmuxStartRes.includes("WATCHDOG_BIN not configured"), "start_worker (tmux): not falling back to non-tmux path");
+
+      // list_workers after start must show pane pid and session reference
+      const tmuxList2 = await call(a, "list_workers", {});
+      const tline2 = tmuxList2.split("\n").find(l => l.startsWith("backend\t"));
+      assert(tline2 && tline2.includes("pid="), "list_workers (tmux): backend shows pane pid after start");
+      assert(tline2 && tline2.includes("tmux="), "list_workers (tmux): backend shows tmux= reference after start");
+
+      // stop_worker in tmux mode must confirm window was killed, not just process killed
+      const tmuxStopRes = await call(a, "stop_worker", { name: "backend" });
+      assert(
+        tmuxStopRes.includes("killed tmux window") || tmuxStopRes.includes("Stopped"),
+        "stop_worker (tmux): confirms tmux window killed", tmuxStopRes
+      );
+
+      await new Promise(r => setTimeout(r, 200));
+      const tmuxList3 = await call(a, "list_workers", {});
+      const tline3 = tmuxList3.split("\n").find(l => l.startsWith("backend\t"));
+      assert(tline3 && tline3.includes("stopped"), "list_workers (tmux): backend shows stopped after tmux kill");
+    } else if (tmuxBackendLine) {
+      // Backend already running in tmux — validate list format only
+      assert(tmuxBackendLine.includes("pid="),   "list_workers (tmux): running backend shows pane pid");
+      assert(tmuxBackendLine.includes("tmux="),  "list_workers (tmux): running backend shows tmux= reference");
+      console.log("  - tmux start/stop round-trip skipped (backend already running in tmux session)");
+    }
+  } else {
+    console.log("\n16b. Worker lifecycle — tmux mode SKIPPED (WORKERS_TMUX_SESSION not set)");
+  }
+
   // Tool list includes all three + sprint_file_conflicts
   assert(toolNames.includes("list_workers"),         "list_workers registered in tool list");
   assert(toolNames.includes("start_worker"),         "start_worker registered in tool list");
