@@ -326,7 +326,14 @@ function spawnWatchdogTmux(def, { model } = {}) {
   if (hasSession.status !== 0) {
     spawnSync(TMUX_BIN, ["new-session", "-d", "-s", WORKERS_TMUX_SESSION], { encoding: "utf8" });
   }
-  const envPrefix = model ? `CLAUDE_MODEL=${model} ` : "";
+  const envParts = [
+    ["BROKER_SECRET", SHARED_SECRET],
+    ["BROKER_URL",    process.env.BROKER_URL],
+    ["CLAUDE_BIN",    process.env.CLAUDE_BIN],
+    ["CLAUDE_MODEL",  model || process.env.CLAUDE_MODEL],
+  ].filter(([, v]) => v);
+  const shellQ = v => "'" + String(v).replace(/'/g, "'\\''") + "'";
+  const envPrefix = envParts.map(([k, v]) => `${k}=${shellQ(v)}`).join(" ") + (envParts.length ? " " : "");
   const args = expandArgs(def.args || []);
   const shellCmd = `${envPrefix}${WATCHDOG_BIN} ${args.map(a => (a.includes(" ") ? `"${a}"` : a)).join(" ")}`;
   const r = spawnSync(TMUX_BIN, ["new-window", "-t", WORKERS_TMUX_SESSION, "-n", def.name, shellCmd], { encoding: "utf8" });
