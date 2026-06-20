@@ -125,6 +125,37 @@ Turn-start ritual and Idle state:
 
 No broker changes required for the heartbeat itself — pure convention layer.
 
+### Heartbeat compliance requirement
+
+All active workers MUST post a heartbeat to their project's telemetry channel
+at least once every **5 minutes** while active.
+
+Telemetry channel by namespace:
+
+| Namespace | Telemetry channel |
+|---|---|
+| `cb-*` workers | `cb-telemetry` |
+| `dv-*` workers | `dv-telemetry` |
+| `rp-*` workers | `rp-telemetry` |
+
+A worker that has been running for more than one turn with zero telemetry
+entries is **non-compliant**. The orchestrator cannot apply standard stop
+conditions (context rotation, cost-runaway, blocked-on-question) without
+heartbeat data — the worker becomes a monitoring blind spot.
+
+**Stop conditions table: Heartbeat non-compliance**
+
+| Condition | How to detect | Orchestrator action |
+|---|---|---|
+| Worker active >20 min, zero telemetry entries, no result on status channel | `read_messages(telemetry, since_id=0)` returns empty | Treat as **silent-death** — escalate to human via `AskUserQuestion` |
+| Worker active >5 min with no new heartbeat after last known entry | Stale timestamp on most recent heartbeat | Post `type: note` to worker inbox: *"no heartbeat in >5m — are you still active?"* |
+
+**Background (2026-06-20, rp-admin):** during ridepro Phase 4 sprint the
+rp-admin worker ran for 30+ minutes with zero entries in rp-telemetry. Normal
+stop conditions (cost-runaway, blocked-on-question) could not be applied;
+human intervention was required. This incident motivated the formal 5-minute
+compliance requirement and the >20-min silent-death escalation rule.
+
 ---
 
 ## Spec 2 — Broker-side envelope validator
@@ -423,6 +454,7 @@ Registration script: `node setup-schemas-broker.js` (re-run is idempotent).
 |---|---|---|---|
 | `dv-backend`, `dv-frontend`, `dv-customer-portal` | `schemas/dv-worker-inbox.json` | 2026-05-27 | warn-only |
 | `dv-orchestrator` | *(uses dv-worker-inbox schema)* | 2026-05-27 | warn-only |
+| `dv-qa` | `schemas/dv-worker-inbox.json` | 2026-06-20 (sprint-009) | **strict** (flipped sprint-011) |
 | `dv-control` | `schemas/dv-control.json` | 2026-05-27 | warn-only |
 | `dv-status` | `schemas/dv-status.json` | 2026-05-27 | warn-only |
 | `dv-telemetry` | `schemas/dv-telemetry.json` | 2026-05-27 | warn-only |
@@ -496,6 +528,12 @@ approach is (b) — schema updates land at sprint start, not mid-flight.
 
 When bumping, re-run the relevant `setup-schemas-*.js` script with the new
 version string and file the change under the sprint's protocol-qa result.
+
+### Channel strict-flip log
+
+| Channel | Registered warn-only | Flipped strict | Hold reason |
+|---|---|---|---|
+| `dv-qa` | sprint-009 (2026-06-20) | sprint-011 (2026-06-20, pqa-024b) | `task_id` pattern `^…-[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+$` required trailing suffix; date-terminal IDs (e.g. `qa-fix-verify-bundle-gaps-2026-06-20`) are valid — suffix made optional |
 
 ## Open questions
 
