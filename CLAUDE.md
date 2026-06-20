@@ -72,12 +72,15 @@ WORKERS_LOG_DIR=/Users/anis/myprojects/claude-broker/worker-logs
 
 ## MCP tools exposed by server.js
 
-`send_message`, `read_messages`, `wait_for_messages`, `has_messages`, `read_last`,
-`list_channels`, `purge_channel`, `delete_message`, `check_result`,
+`send_message`, `send_message_batch`, `read_messages`, `wait_for_messages`,
+`has_messages`, `read_last`, `list_channels`, `purge_channel`,
+`purge_channels_by_prefix`, `delete_message`, `check_result`,
 `check_results_batch`, `get_latest_per_sender`, `post_gated_message`,
 `register_channel_schema`, `get_channel_schema`, `clear_channel_schema`,
 `list_channel_schemas`, `register_capability`, `deregister_capability`,
-`list_capabilities`, `list_workers`, `start_worker`, `stop_worker`.
+`list_capabilities`, `list_workers`, `start_worker`, `stop_worker`,
+`upsert_heartbeat`, `get_latest_heartbeats`, `turn_start`,
+`sprint_summary`, `sprint_file_conflicts`.
 
 ## Channel namespaces in use
 

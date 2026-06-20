@@ -145,18 +145,17 @@ Whenever protocol-qa registers or tightens a schema:
 
 ## Key improvement backlog (from docs/protocol-v2.md)
 
-These are the known unimplemented specs — the primary improvement agenda:
-
-| Item | Spec | Status |
+| Item | Status | Sprint |
 |---|---|---|
-| Envelope validator (Ajv, warn-only then strict) | Spec 2 | Partially done — schemas exist, not all channels covered |
-| Heartbeat channel `dv-telemetry` formal spec | Spec 1 | Schema not registered |
-| `cb-` namespace schemas | — | Not yet registered |
-| Schema versioning across sprint boundaries | Spec 2 open question | Not addressed |
-| `get_latest_heartbeats()` MCP tool | Spec 1 open question | Not implemented |
+| Envelope validator (Ajv, warn-only then strict) | COMPLETE — all 36 channels strict | 001-016 |
+| Heartbeat channel `dv-telemetry` formal spec | COMPLETE — schema strict, `get_latest_heartbeats` tool | 001, 004 |
+| `cb-*` namespace schemas | COMPLETE — 7 cb-* channels, all strict | 004, 009 |
+| Schema versioning across sprint boundaries | COMPLETE — `version=1.0` on all schemas | 011 |
+| `get_latest_heartbeats()` MCP tool | COMPLETE — implemented and tested | 001, 017 |
 
-Prioritize: schema coverage + cb-namespace first (low risk), then heartbeat tool
-(medium), then schema versioning (complex).
+### Current backlog
+
+No open items — all known improvement items complete.
 
 ## Approval-token protocol
 

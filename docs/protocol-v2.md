@@ -535,6 +535,21 @@ version string and file the change under the sprint's protocol-qa result.
 |---|---|---|---|
 | `dv-qa` | sprint-009 (2026-06-20) | sprint-011 (2026-06-20, pqa-024b) | `task_id` pattern `^…-[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+$` required trailing suffix; date-terminal IDs (e.g. `qa-fix-verify-bundle-gaps-2026-06-20`) are valid — suffix made optional |
 
+### Schema coverage milestone — sprint-016 (2026-06-20)
+
+As of sprint-016, **all 36 channels** across all active namespaces are strict-validated. Zero warn-only channels remain.
+
+| Namespace | Channel count | Status |
+|---|---|---|
+| `cb-*` | 7 | All strict |
+| `dv-*` | 10 | All strict |
+| `rp-*` | 11 | All strict |
+| `dx-*` | 8 | All strict |
+
+### Test coverage milestone — sprint-017 (2026-06-20)
+
+`test-v2.js` now covers all **29 MCP tools** with **167 assertions** (added Section 19 in sprint-017, task `cb-2026-06-20-pqa-035`).
+
 ## Open questions
 
 - **Heartbeat compaction.** At 90s cadence × 4 workers × multi-hour sprint,
