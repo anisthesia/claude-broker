@@ -10,8 +10,8 @@
     },
     "task_id": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$",
-      "description": "Format: <slug>-YYYY-MM-DD-<short-name>"
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]*$",
+      "description": "Any hyphen-separated alphanumeric identifier."
     },
     "from": { "const": "orchestrator" },
     "to": { "enum": ["api", "admin", "web", "android", "ios", "qa", "*"] },
@@ -20,7 +20,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*-\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+:(api|admin|web|android|ios|qa)$"
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]*:(api|admin|web|android|ios|qa)$"
       },
       "description": "<task_id>:<worker> refs that must be complete before this task starts."
     },
@@ -32,6 +32,10 @@
     "wire_compat": {
       "enum": ["additive", "breaking"],
       "description": "Required on type:contract-change."
+    },
+    "baseline_task_id": {
+      "type": "string",
+      "description": "Optional reference to a baseline task for comparison."
     },
     "body": {},
     "refs": { "type": "array" }

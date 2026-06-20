@@ -10,25 +10,16 @@
     "from": { "enum": ["api", "admin", "web", "android", "ios", "qa", "orchestrator"] },
     "to": { "const": "orchestrator" },
     "subject": { "type": "string", "minLength": 3 },
-    "body": { "type": "object" },
+    "body": {
+      "type": "object",
+      "properties": {
+        "resolved_in_sprint": { "type": "string" },
+        "outcome": { "enum": ["promoted", "cancelled", "superseded"] },
+        "promoted_sprint": { "type": "string" },
+        "promoted_at": { "type": "string" }
+      }
+    },
     "deferred_reason": { "type": "string" }
   },
-  "allOf": [
-    {
-      "if": { "properties": { "type": { "const": "deferred-resolved" } }, "required": ["type"] },
-      "then": {
-        "properties": {
-          "body": {
-            "type": "object",
-            "required": ["resolved_in_sprint", "outcome"],
-            "properties": {
-              "resolved_in_sprint": { "type": "string" },
-              "outcome": { "enum": ["promoted", "cancelled", "superseded"] }
-            }
-          }
-        }
-      }
-    }
-  ],
   "additionalProperties": false
 }

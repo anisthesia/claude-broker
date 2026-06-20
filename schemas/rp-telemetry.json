@@ -27,7 +27,7 @@
       "properties": {
         "last_tool_call_ts": { "type": "string", "format": "date-time" },
         "current_task_id": { "type": ["string", "null"] },
-        "state": { "enum": ["working", "idle-polling", "blocked-on-question", "rotating"] }
+        "state": { "enum": ["working", "idle-polling", "blocked-on-question", "rotating", "idle-exit"] }
       }
     },
     "cost_since_start": {

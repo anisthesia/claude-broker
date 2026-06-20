@@ -17,27 +17,24 @@ const STRICT     = process.env.STRICT === "1";
 
 // 6 worker inboxes share the worker-inbox schema; orchestrator, status, control, telemetry, backlog are distinct
 //
-// strict column: per-channel flip status as of 2026-06-20.
-//   STRICT=1 env var overrides all to strict.
-//   Channels held warn-only due to known violations:
-//     rp-admin      — task_id uppercase P3, missing date in mod-P3-001; baseline_task_id extra prop; depends_on items fail pattern
-//     rp-ios        — same task_id/depends_on pattern failures + baseline_task_id extra prop
-//     rp-qa         — qa-phase3-verify-2026-06-20 missing suffix after date (fails pattern)
-//     rp-backlog    — deferred-resolved uses promoted_sprint/promoted_at instead of required resolved_in_sprint/outcome
-//     rp-status     — most type:result missing consent_basis; results with commits missing affected_files
-//     rp-telemetry  — activity.state "idle-exit" not in allowed enum
+// strict column: all 11 rp-* channels are strict as of pqa-022 (2026-06-20).
+//   Schema defects fixed in pqa-022:
+//     rp-worker-inbox — relaxed task_id + depends_on patterns to [a-zA-Z0-9][a-zA-Z0-9-]*; added baseline_task_id optional field
+//     rp-backlog      — deferred-resolved body accepts promoted_sprint/promoted_at (in addition to resolved_in_sprint/outcome)
+//     rp-status       — consent_basis + affected_files made optional on type:result
+//     rp-telemetry    — added "idle-exit" to activity.state enum
 const REGISTRATIONS = [
   { channel: "rp-api",          file: "schemas/rp-worker-inbox.json",       strict: true  },
-  { channel: "rp-admin",        file: "schemas/rp-worker-inbox.json",       strict: false },
+  { channel: "rp-admin",        file: "schemas/rp-worker-inbox.json",       strict: true  },
   { channel: "rp-web",          file: "schemas/rp-worker-inbox.json",       strict: true  },
   { channel: "rp-android",      file: "schemas/rp-worker-inbox.json",       strict: true  },
-  { channel: "rp-ios",          file: "schemas/rp-worker-inbox.json",       strict: false },
-  { channel: "rp-qa",           file: "schemas/rp-worker-inbox.json",       strict: false },
+  { channel: "rp-ios",          file: "schemas/rp-worker-inbox.json",       strict: true  },
+  { channel: "rp-qa",           file: "schemas/rp-worker-inbox.json",       strict: true  },
   { channel: "rp-orchestrator", file: "schemas/rp-orchestrator-inbox.json", strict: true  },
-  { channel: "rp-status",       file: "schemas/rp-status.json",             strict: false },
+  { channel: "rp-status",       file: "schemas/rp-status.json",             strict: true  },
   { channel: "rp-control",      file: "schemas/rp-control.json",            strict: true  },
-  { channel: "rp-telemetry",    file: "schemas/rp-telemetry.json",          strict: false },
-  { channel: "rp-backlog",      file: "schemas/rp-backlog.json",            strict: false },
+  { channel: "rp-telemetry",    file: "schemas/rp-telemetry.json",          strict: true  },
+  { channel: "rp-backlog",      file: "schemas/rp-backlog.json",            strict: true  },
 ];
 
 async function main() {
