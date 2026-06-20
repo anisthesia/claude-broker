@@ -628,8 +628,122 @@ async function run() {
   assert(toolNames.includes("get_latest_heartbeats"), "get_latest_heartbeats: registered in tool list");
   assert(toolNames.includes("upsert_heartbeat"),       "upsert_heartbeat: registered in tool list");
 
+  // ── 19. Uncovered tool coverage ──────────────────────────────────────────────
+  console.log("\n19. Uncovered tool coverage");
+
+  // 19a. send_message_batch
+  const bch1 = `test-batch-${Date.now()}`;
+  const bch2 = `test-batch2-${Date.now()}`;
+  const batchRes = await call(a, "send_message_batch", {
+    messages: [
+      { channel: bch1, sender: "alice", content: JSON.stringify({ type: "task", v: 1 }) },
+      { channel: bch1, sender: "bob",   content: JSON.stringify({ type: "task", v: 2 }) },
+      { channel: bch2, sender: "carol", content: JSON.stringify({ type: "task", v: 3 }) },
+    ],
+  });
+  assert(batchRes.includes("Sent 3 messages"), `send_message_batch: reports 3 sent (got: ${batchRes.slice(0, 60)})`);
+  const afterBatch1 = await call(a, "read_messages", { channel: bch1, since_id: 0 });
+  assert(afterBatch1.includes('"v":1') && afterBatch1.includes('"v":2'), "send_message_batch: both messages arrived on bch1");
+  const afterBatch2 = await call(a, "read_messages", { channel: bch2, since_id: 0 });
+  assert(afterBatch2.includes('"v":3'), "send_message_batch: message arrived on bch2");
+  assert(toolNames.includes("send_message_batch"), "send_message_batch: registered in tool list");
+
+  // 19b. check_results_batch
+  const crbch  = `test-crb-${Date.now()}`;
+  const crbId1 = `task-crb1-${Date.now()}`;
+  const crbId2 = `task-crb2-${Date.now()}`;
+  const crbId3 = `task-crb3-${Date.now()}`;
+  await call(a, "send_message", { channel: crbch, sender: "w", content: JSON.stringify({ type: "result", task_id: crbId1, summary: "PASS" }) });
+  await call(a, "send_message", { channel: crbch, sender: "w", content: JSON.stringify({ type: "result", task_id: crbId2, summary: "PASS" }) });
+  const crbRaw    = await call(a, "check_results_batch", { channel: crbch, task_ids: [crbId1, crbId2, crbId3] });
+  const crbResult = JSON.parse(crbRaw);
+  assert(crbResult.channel === crbch,              "check_results_batch: channel echoed back");
+  assert(crbResult.results[crbId1] === true,        "check_results_batch: found=true for task with result");
+  assert(crbResult.results[crbId2] === true,        "check_results_batch: found=true for second task with result");
+  assert(crbResult.results[crbId3] === false,       "check_results_batch: found=false for task without result");
+  assert(toolNames.includes("check_results_batch"), "check_results_batch: registered in tool list");
+
+  // 19c. get_latest_per_sender
+  const gpsInbox = `test-gps-${Date.now()}`;
+  await call(a, "send_message", { channel: gpsInbox, sender: "worker-a", content: JSON.stringify({ v: 1 }) });
+  await call(a, "send_message", { channel: gpsInbox, sender: "worker-b", content: JSON.stringify({ v: 2 }) });
+  await call(a, "send_message", { channel: gpsInbox, sender: "worker-a", content: JSON.stringify({ v: 3 }) });
+  const gpsRaw   = await call(a, "get_latest_per_sender", { channel: gpsInbox });
+  const gpsLines = gpsRaw.trim().split("\n").filter(l => l.trim());
+  assert(gpsLines.length === 2,                                       `get_latest_per_sender: 2 entries (one per sender, got ${gpsLines.length})`);
+  assert(gpsRaw.includes("worker-a") && gpsRaw.includes("worker-b"), "get_latest_per_sender: both senders present");
+  assert(gpsRaw.includes('"v":3') && !gpsRaw.includes('"v":1'),      "get_latest_per_sender: returns only latest per sender (v:3 not v:1)");
+  const gpsEmpty = await call(a, "get_latest_per_sender", { channel: `test-gps-empty-${Date.now()}` });
+  assert(gpsEmpty.includes("No messages"),                            "get_latest_per_sender: empty channel → 'No messages'");
+  assert(toolNames.includes("get_latest_per_sender"),                 "get_latest_per_sender: registered in tool list");
+
+  // 19d. turn_start
+  const tsInbox = `test-ts-inbox-${Date.now()}`;
+  const tsCtrl  = `test-ts-ctrl-${Date.now()}`;
+  const tsCtrl2 = `test-ts-ctrl2-${Date.now()}`;
+  await call(a, "send_message", { channel: tsInbox, sender: "orch", content: JSON.stringify({ type: "task", task_id: "t1" }) });
+  await call(a, "send_message", { channel: tsCtrl,  sender: "orch", content: JSON.stringify({ type: "note", subject: "broadcast" }) });
+  const tsRaw    = await call(a, "turn_start", { inbox_channel: tsInbox, control_channel: tsCtrl, inbox_since_id: 0, control_since_id: 0 });
+  const tsResult = JSON.parse(tsRaw);
+  assert(Array.isArray(tsResult.inbox),                          "turn_start: inbox is an array");
+  assert(Array.isArray(tsResult.control),                        "turn_start: control is an array");
+  assert(typeof tsResult.rotate_requested === "boolean",         "turn_start: rotate_requested is boolean");
+  assert(typeof tsResult.inbox_next_id    === "number",          "turn_start: inbox_next_id is a number");
+  assert(typeof tsResult.control_next_id  === "number",          "turn_start: control_next_id is a number");
+  assert(tsResult.inbox.length   === 1,                          "turn_start: one inbox message returned");
+  assert(tsResult.control.length === 1,                          "turn_start: one control message returned");
+  assert(tsResult.rotate_requested === false,                    "turn_start: rotate_requested=false (no rotate msg)");
+  await call(a, "send_message", { channel: tsCtrl2, sender: "orch", content: JSON.stringify({ type: "rotate", reason: "context" }) });
+  const tsRaw2    = await call(a, "turn_start", { inbox_channel: tsInbox, control_channel: tsCtrl2 });
+  const tsResult2 = JSON.parse(tsRaw2);
+  assert(tsResult2.rotate_requested === true,                    "turn_start: rotate_requested=true when control has rotate message");
+  assert(toolNames.includes("turn_start"),                       "turn_start: registered in tool list");
+
+  // 19e. sprint_summary
+  const ssStatus = `test-ss-status-${Date.now()}`;
+  await call(a, "send_message", { channel: ssStatus, sender: "w", content: JSON.stringify({ type: "result", task_id: "t1", summary: "PASS — done" }) });
+  await call(a, "send_message", { channel: ssStatus, sender: "w", content: JSON.stringify({ type: "result", task_id: "t2", summary: "FAIL — broken" }) });
+  const ssRaw    = await call(a, "sprint_summary", { status_channel: ssStatus });
+  const ssResult = JSON.parse(ssRaw);
+  assert(ssResult.status_channel === ssStatus,    "sprint_summary: status_channel echoed back");
+  assert(typeof ssResult.dispatched === "number", "sprint_summary: dispatched is a number");
+  assert(typeof ssResult.completed  === "number", "sprint_summary: completed is a number");
+  assert(typeof ssResult.failed     === "number", "sprint_summary: failed is a number");
+  assert(typeof ssResult.pending    === "number", "sprint_summary: pending is a number");
+  assert(ssResult.completed === 2,                `sprint_summary: completed=2 (got ${ssResult.completed})`);
+  assert(ssResult.failed    === 1,                `sprint_summary: failed=1 (got ${ssResult.failed})`);
+  assert(ssResult.sprint    === null,             "sprint_summary: sprint=null when control_channel omitted");
+  assert(toolNames.includes("sprint_summary"),    "sprint_summary: registered in tool list");
+
+  // 19f. sprint_file_conflicts
+  const sfcStatus = `test-sfc-status-${Date.now()}`;
+  // worker-a and worker-b both touch file-x.ts → conflict; file-a.ts and file-y.ts are single-owner → clean
+  await call(a, "send_message", { channel: sfcStatus, sender: "worker-a", content: JSON.stringify({ type: "result", from: "worker-a", task_id: "ta1", summary: "PASS", affected_files: ["file-x.ts", "file-a.ts"] }) });
+  await call(a, "send_message", { channel: sfcStatus, sender: "worker-b", content: JSON.stringify({ type: "result", from: "worker-b", task_id: "tb1", summary: "PASS", affected_files: ["file-x.ts"] }) });
+  await call(a, "send_message", { channel: sfcStatus, sender: "worker-c", content: JSON.stringify({ type: "result", from: "worker-c", task_id: "tc1", summary: "PASS", affected_files: ["file-y.ts"] }) });
+  await call(a, "send_message", { channel: sfcStatus, sender: "worker-d", content: JSON.stringify({ type: "result", from: "worker-d", task_id: "td1", summary: "PASS" }) });
+  const sfcRaw    = await call(a, "sprint_file_conflicts", { status_channel: sfcStatus });
+  const sfcResult = JSON.parse(sfcRaw);
+  assert(sfcResult.status_channel === sfcStatus,                  "sprint_file_conflicts: status_channel echoed back");
+  assert(typeof sfcResult.since_id    === "number",               "sprint_file_conflicts: since_id is a number");
+  assert(Array.isArray(sfcResult.conflicts),                      "sprint_file_conflicts: conflicts is an array");
+  assert(typeof sfcResult.clean_count === "number",               "sprint_file_conflicts: clean_count is a number");
+  assert(Array.isArray(sfcResult.blind_spots),                    "sprint_file_conflicts: blind_spots is an array");
+  assert(typeof sfcResult.summary     === "string",               "sprint_file_conflicts: summary is a string");
+  assert(sfcResult.conflicts.length   === 1,                      `sprint_file_conflicts: 1 conflict detected (got ${sfcResult.conflicts.length})`);
+  assert(sfcResult.conflicts[0].file  === "file-x.ts",            "sprint_file_conflicts: conflicting file is file-x.ts");
+  assert(
+    sfcResult.conflicts[0].workers.includes("worker-a") &&
+    sfcResult.conflicts[0].workers.includes("worker-b"),
+    "sprint_file_conflicts: conflict involves worker-a and worker-b",
+  );
+  assert(sfcResult.clean_count === 2,                             `sprint_file_conflicts: clean_count=2 (file-a.ts + file-y.ts, got ${sfcResult.clean_count})`);
+  assert(sfcResult.blind_spots.includes("worker-d"),              "sprint_file_conflicts: worker-d in blind_spots");
+  assert(sfcResult.summary.includes("conflict"),                  "sprint_file_conflicts: summary mentions conflict");
+  assert(toolNames.includes("sprint_file_conflicts"),             "sprint_file_conflicts: registered in tool list");
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
-  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch]) {
+  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch, bch1, bch2, crbch, gpsInbox, tsInbox, tsCtrl, tsCtrl2, ssStatus, sfcStatus]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   // clear any schemas registered on test channels (safety net if test fails mid-run)
