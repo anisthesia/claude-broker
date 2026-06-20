@@ -54,6 +54,7 @@ async function run() {
     assert(names.includes(expected), `tool '${expected}' registered`, `missing — got: ${names.join(", ")}`);
   }
   assert(names.includes("purge_channel"), "tool 'purge_channel' registered");
+  assert(names.includes("purge_channels_by_prefix"), "tool 'purge_channels_by_prefix' registered");
 
   // ── 2. filter_sender on read_messages ─────────────────────────────────────
   console.log("\n2. filter_sender on read_messages");
@@ -149,6 +150,36 @@ async function run() {
 
   const afterPrune = await call(a, "read_messages", { channel: pch, since_id: 0 });
   assert(afterPrune.includes("new msg") && !afterPrune.includes("old msg"), "recent message survives older_than_ms prune");
+
+  // ── 6b. purge_channels_by_prefix ──────────────────────────────────────────
+  console.log("\n6b. purge_channels_by_prefix");
+  const prefix = `test-pfx-${Date.now()}`;
+  const ch1 = `${prefix}-a`;
+  const ch2 = `${prefix}-b`;
+  const ch3 = `${prefix}-c`;
+
+  await call(a, "send_message", { channel: ch1, sender: "x", content: "msg1" });
+  await call(a, "send_message", { channel: ch2, sender: "x", content: "msg2" });
+  await call(a, "send_message", { channel: ch3, sender: "x", content: "msg3" });
+
+  const prefixRes = await call(a, "purge_channels_by_prefix", { prefix });
+  const prefixObj = JSON.parse(prefixRes.match(/\{[\s\S]*\}/)[0]);
+  assert(prefixObj.total_deleted === 3, `purge_channels_by_prefix purges all matching channels (got ${prefixObj.total_deleted})`);
+  assert(prefixObj.purged.length === 3, "three channels purged");
+
+  const afterPrefixPurge = await call(a, "read_messages", { channel: ch1, since_id: 0 });
+  assert(afterPrefixPurge.includes("No new messages"), "channel after prefix purge is empty");
+
+  // Test PRUNE_EXEMPT: create channels with different prefixes, one matching PRUNE_EXEMPT
+  const exempt_prefix = "dv-backlog"; // This is in PRUNE_EXEMPT by default
+  const normal_prefix = `test-noex-${Date.now()}`;
+  const normal_ch = `${normal_prefix}-test`;
+  await call(a, "send_message", { channel: normal_ch, sender: "x", content: "normal" });
+  await call(a, "send_message", { channel: exempt_prefix, sender: "x", content: "exempt" });
+
+  const exemptRes = await call(a, "purge_channels_by_prefix", { prefix: normal_prefix });
+  const exemptObj = JSON.parse(exemptRes.match(/\{[\s\S]*\}/)[0]);
+  assert(exemptObj.total_deleted >= 1, "prefix purge deletes from non-exempt channels");
 
   // ── 7. register_capability / list_capabilities / deregister_capability ───
   console.log("\n7. Capability registry");

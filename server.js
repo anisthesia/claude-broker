@@ -98,6 +98,7 @@ function getMultiSenderStmt(nSenders, hasType) {
 }
 const stmtDeleteOne    = db.prepare("DELETE FROM messages WHERE id = ? AND channel = ?");
 const stmtChans        = db.prepare("SELECT channel, COUNT(*) AS n, MAX(id) AS last_id, MAX(created_at) AS last_ts FROM messages GROUP BY channel ORDER BY channel");
+const stmtChansByPrefix = db.prepare("SELECT DISTINCT channel FROM messages WHERE channel LIKE ? ORDER BY channel");
 const stmtPurge        = db.prepare("DELETE FROM messages WHERE channel = ?");
 const stmtPruneOlder   = db.prepare("DELETE FROM messages WHERE channel = ? AND created_at < ?");
 const stmtPruneAllOld  = db.prepare("DELETE FROM messages WHERE channel NOT IN (SELECT value FROM json_each(?)) AND created_at < ?");
@@ -685,6 +686,44 @@ function buildServer() {
     }
     r = stmtPurge.run(channel);
     return { content: [{ type: "text", text: `Purged ${r.changes} messages from '${channel}'.` }] };
+  });
+
+  // ── purge_channels_by_prefix ─────────────────────────────────────────────────
+  server.registerTool("purge_channels_by_prefix", {
+    title: "Purge channels by prefix",
+    description: "Delete messages from all channels matching a prefix. Without older_than_ms, deletes all messages. With older_than_ms, deletes only messages older than that many milliseconds. Skips channels in PRUNE_EXEMPT.",
+    inputSchema: {
+      prefix:        z.string().min(1).describe("Delete messages from all channels whose name starts with this prefix."),
+      older_than_ms: z.number().int().positive().optional().describe("If set, only delete messages older than this many ms. Omit to delete all."),
+    },
+  }, async ({ prefix, older_than_ms }) => {
+    const channels = stmtChansByPrefix.all(prefix + "%");
+    const purged = [];
+    const skipped_exempt = [];
+    let total_deleted = 0;
+
+    for (const row of channels) {
+      if (PRUNE_EXEMPT.includes(row.channel)) {
+        skipped_exempt.push(row.channel);
+        continue;
+      }
+
+      let r;
+      if (older_than_ms != null) {
+        r = stmtPruneOlder.run(row.channel, Date.now() - older_than_ms);
+      } else {
+        r = stmtPurge.run(row.channel);
+      }
+      purged.push({ channel: row.channel, deleted_count: r.changes });
+      total_deleted += r.changes;
+    }
+
+    const result = {
+      purged,
+      skipped_exempt,
+      total_deleted,
+    };
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
   // ── register_capability ─────────────────────────────────────────────────────
