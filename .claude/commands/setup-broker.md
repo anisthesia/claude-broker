@@ -121,12 +121,18 @@ If No: stop. If Change: re-collect the specific field and re-confirm.
 
 ### 4a. `.claude/settings.json`
 
-If BROKER_URL is localhost: write to `<TARGET_ROOT>/.claude/settings.json`.
-If BROKER_URL is remote (not localhost/127.0.0.1): write to `<TARGET_ROOT>/.claude/settings.local.json`
-and warn the user that this file must be gitignored (it contains the secret).
-Check `.gitignore` and add `.claude/settings.local.json` if missing.
+Determine target file:
+- BROKER_URL is localhost/127.0.0.1: `<TARGET_ROOT>/.claude/settings.json`
+- BROKER_URL is remote: `<TARGET_ROOT>/.claude/settings.local.json` — warn the user this file must be gitignored (it contains the secret). Check `.gitignore` and add `.claude/settings.local.json` if missing.
 
-Content:
+**Merge logic** — read the existing file before writing:
+```bash
+cat <TARGET_FILE> 2>/dev/null
+```
+- If the file exists: parse the JSON, set/replace `mcpServers.broker` while preserving all other keys, then write back.
+- If the file does not exist: write the full file below.
+
+Content (full file when creating from scratch, or the `mcpServers.broker` block when merging):
 
 ```json
 {
@@ -712,11 +718,7 @@ Read `<BROKER_REPO>/workers-broker.json`. It is a JSON array. Append one entry p
 {
   "name": "<PREFIX>-<worker>",
   "ns": "<PREFIX>",
-  "args": ["workers/<worker>", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-<worker>"],
-  "env": {
-    "BROKER_URL": "<BROKER_URL>",
-    "BROKER_SECRET": "<BROKER_SECRET>"
-  }
+  "args": ["workers/<worker>", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-<worker>"]
 }
 ```
 
@@ -725,13 +727,11 @@ Orchestrator entry:
 {
   "name": "<PREFIX>-orch",
   "ns": "<PREFIX>",
-  "args": ["orchestrators/<PROJECT_NAME>", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-orchestrator"],
-  "env": {
-    "BROKER_URL": "<BROKER_URL>",
-    "BROKER_SECRET": "<BROKER_SECRET>"
-  }
+  "args": ["orchestrators/<PROJECT_NAME>", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-orchestrator"]
 }
 ```
+
+> **Note — env var distribution**: `workers-broker.json` entries do not support an `env` block; the broker's `start_worker` ignores it. `BROKER_URL` and `BROKER_SECRET` must be set in the environment where the broker server runs (the broker's own `.env` file) **or** passed explicitly in the watchdog start commands printed in Step 7.
 
 ### 5d. Update `.env` PRUNE_EXEMPT
 
@@ -758,7 +758,9 @@ If it succeeds: confirm each expected channel appears in the output.
 
 ## Step 7 — Print watchdog start commands
 
-Print the following for the user to copy-paste into terminals:
+Print the following for the user to copy-paste into terminals.
+
+**If BROKER_URL is localhost or 127.0.0.1** — omit BROKER_URL from each command:
 
 ```
 === WORKER START COMMANDS ===
@@ -771,6 +773,26 @@ BROKER_SECRET=<BROKER_SECRET> \
 
 # Worker: <worker1>
 BROKER_SECRET=<BROKER_SECRET> \
+  <WATCHDOG_PATH> workers/<worker1> \
+    --repo-root <TARGET_ROOT> \
+    --inbox-channel <PREFIX>-<worker1>
+
+# (one block per additional worker)
+```
+
+**If BROKER_URL is remote (not localhost/127.0.0.1)** — prepend `BROKER_URL=<BROKER_URL>` to every command:
+
+```
+=== WORKER START COMMANDS ===
+
+# Orchestrator (open a dedicated terminal tab)
+BROKER_URL=<BROKER_URL> BROKER_SECRET=<BROKER_SECRET> \
+  <WATCHDOG_PATH> orchestrators/<PROJECT_NAME> \
+    --repo-root <TARGET_ROOT> \
+    --inbox-channel <PREFIX>-orchestrator
+
+# Worker: <worker1>
+BROKER_URL=<BROKER_URL> BROKER_SECRET=<BROKER_SECRET> \
   <WATCHDOG_PATH> workers/<worker1> \
     --repo-root <TARGET_ROOT> \
     --inbox-channel <PREFIX>-<worker1>
@@ -813,7 +835,7 @@ Confirm each item aloud to the user before finishing:
 - [ ] Orchestrator template includes: turn-start ritual, sprint lifecycle, stop conditions, approval-token protocol, channel layout table, worker registry
 - [ ] `<BROKER_REPO>/schemas/<PREFIX>-*.json` created (6 files)
 - [ ] `<BROKER_REPO>/setup-schemas-<PREFIX>.js` created — uses `BROKER_URL` env var (not hardcoded)
-- [ ] `<BROKER_REPO>/workers-broker.json` updated — new entries include `BROKER_URL` + `BROKER_SECRET` in `env` block
+- [ ] `<BROKER_REPO>/workers-broker.json` updated — new entries appended (no `env` block; env vars distributed via watchdog commands or broker `.env`)
 - [ ] `<BROKER_REPO>/.env` `PRUNE_EXEMPT` line updated to include `<PREFIX>-backlog`
 - [ ] Schema registration ran successfully (or user notified of failure + manual command)
 - [ ] Watchdog start commands printed
