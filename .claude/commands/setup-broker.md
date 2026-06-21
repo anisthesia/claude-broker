@@ -359,6 +359,9 @@ Rules:
 
 ### Liveness enforcement during long-poll
 
+- **Always use `filter_type="result"`** when waiting for a task result — skips notes,
+  idempotency skips, idle-exit statuses, and heartbeats.
+  Example: `wait_for_messages(channel="{{PREFIX}}-status", since_id=<last>, filter_sender=<worker>, filter_type="result", timeout_ms=300000)`
 - Break long-polls into max 5-minute chunks (`timeout_ms=300000`)
 - After each timeout: call `get_latest_per_sender("{{PREFIX}}-telemetry")`
 - If heartbeat `ts` is >10 min old and `state` was `"working"` → silent-death:

@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 53 assertions across 5 sections.
+ * 54 assertions across 5 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -526,6 +526,12 @@ async function run() {
   assert(
     content.includes("WORKERS_CONFIG"),
     "Step 5c: detects WORKERS_CONFIG path from broker .env",
+  );
+
+  // 54 — orchestrator template liveness enforcement section includes filter_type
+  assert(
+    content.includes("filter_type") && /[Ll]iveness enforcement/.test(content),
+    "Liveness enforcement section: filter_type=result documented",
   );
 
   // ── Summary ───────────────────────────────────────────────────────────────
