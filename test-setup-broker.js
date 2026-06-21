@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 72 assertions across 7 sections.
+ * 76 assertions across 8 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -646,6 +646,33 @@ async function run() {
   assert(
     /Multi-repo.*applicable|Multi-repo.*settings\.json|Multi-repo.*repo-root/i.test(content),
     "Verification checklist: multi-repo items present",
+  );
+
+  // ── 8. Branch safety guards ───────────────────────────────────────────────────
+  console.log("\n8. Branch safety guards");
+
+  // 73 — branch checkout step present in turn-start ritual
+  assert(
+    /git.*checkout.*worker.*WORKER|checkout.*worker.*{{WORKER}}/i.test(content),
+    "Worker turn-start: git checkout worker/{{WORKER}} step present",
+  );
+
+  // 74 — branch verification after checkout
+  assert(
+    /branch --show-current.*worker.*WORKER|branch.*show-current.*WORKER/i.test(content),
+    "Worker turn-start: git branch --show-current verification present",
+  );
+
+  // 75 — branch assertion before commit
+  assert(
+    /branch.*show-current.*commit|Verify branch before.*commit|before.*commit.*branch/i.test(content),
+    "Worker commit protocol: branch verification before staging present",
+  );
+
+  // 76 — verification checklist includes branch safety item
+  assert(
+    /branch safety guard|branch.*safety.*check/i.test(content),
+    "Verification checklist: branch safety guards item present",
   );
 
   // ── Summary ───────────────────────────────────────────────────────────────

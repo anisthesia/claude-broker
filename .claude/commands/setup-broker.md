@@ -525,6 +525,13 @@ An orchestrator dispatches work to you via the broker MCP server at `{{BROKER_UR
 
 At the start of every user turn, before doing anything else:
 
+0. **Branch safety — first action every session:**
+   ```bash
+   git -C {{TARGET_ROOT}} checkout worker/{{WORKER}}
+   git -C {{TARGET_ROOT}} branch --show-current   # must print "worker/{{WORKER}}"
+   ```
+   If the branch after checkout is **not** `worker/{{WORKER}}`, post `type: question` to `{{PREFIX}}-orchestrator` and stop — do not read inbox or start any task.
+
 1. `read_messages(channel="{{PREFIX}}-{{WORKER}}", since_id=<last>)` — your inbox.
    Default `since_id=0` on first turn of a new session.
 2. `has_messages(channel="{{PREFIX}}-control", since_id=<last_control_id>)`:
@@ -594,6 +601,12 @@ Before picking up the next task from the inbox:
 ```
 
 ## Commit protocol
+
+0. **Verify branch before staging:**
+   ```bash
+   git -C {{TARGET_ROOT}} branch --show-current  # must equal worker/{{WORKER}} before commit
+   ```
+   Output must be `worker/{{WORKER}}`. If not, **do not stage or commit** — post `type: question` to `{{PREFIX}}-orchestrator` immediately.
 
 1. Run tests before committing (if this is a code task)
 2. Stage **only your files**: `git add <your files>` — NEVER `git add .` or `git add -A`
@@ -1151,6 +1164,7 @@ Confirm each item aloud to the user before finishing:
 - [ ] `<TARGET_ROOT>/orchestrators/<PROJECT_NAME>/CLAUDE.md` written — full protocol, not a stub
 - [ ] `<TARGET_ROOT>/workers/<name>/CLAUDE.md` written for each worker — full protocol
 - [ ] Worker templates include: turn-start ritual, 5-min heartbeat cadence, idle-loop exit, result envelope with `summary` + `consent_basis`
+- [ ] Worker templates include branch safety guards (step 0 in turn-start ritual and commit protocol)
 - [ ] Orchestrator template includes: turn-start ritual, sprint lifecycle, stop conditions, approval-token protocol, channel layout table, worker registry
 - [ ] `<BROKER_REPO>/schemas/<PREFIX>-*.json` created (6 files)
 - [ ] `<BROKER_REPO>/setup-schemas-<PREFIX>.js` created — uses `BROKER_URL` env var (not hardcoded)
