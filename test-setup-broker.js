@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 50 assertions across 5 sections.
+ * 52 assertions across 5 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -508,6 +508,18 @@ async function run() {
     content.includes("Target project files committed to git") ||
     content.includes("committed to git"),
     "Verification checklist includes git commit items",
+  );
+
+  // 51 — Step 5c has name-collision guard for workers-broker.json
+  assert(
+    content.includes("all entries already present, skipped"),
+    "Step 5c: workers-broker.json name-collision guard present",
+  );
+
+  // 52 — Step 5d has duplicate guard for PRUNE_EXEMPT
+  assert(
+    content.includes("already contains <PREFIX>-backlog, skipped"),
+    "Step 5d: PRUNE_EXEMPT duplicate guard present",
   );
 
   // ── Summary ───────────────────────────────────────────────────────────────

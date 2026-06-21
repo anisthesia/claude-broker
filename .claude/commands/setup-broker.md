@@ -762,7 +762,13 @@ Replace all `<PREFIX>` and `<worker>` placeholders with actual values. Expand th
 
 ### 5c. Append to `workers-broker.json`
 
-Read `<BROKER_REPO>/workers-broker.json`. It is a JSON array. Append one entry per worker and one for the orchestrator. Use this shape:
+Read `<BROKER_REPO>/workers-broker.json`. It is a JSON array. Apply a name-collision guard before appending — for each entry you plan to add, check if an entry with that `name` already exists:
+- If `array.some(e => e.name === newEntry.name)` → skip that entry (already present)
+- Otherwise → append it to the array
+- If all entries were skipped: print `[setup-broker] workers-broker.json — all entries already present, skipped` and do not rewrite the file
+- If any entries were appended: write the updated array back to the file and proceed to commit as normal
+
+Append one entry per worker and one for the orchestrator. Use this shape:
 
 ```json
 {
@@ -785,7 +791,9 @@ Orchestrator entry:
 
 ### 5d. Update `.env` PRUNE_EXEMPT
 
-Read `<BROKER_REPO>/.env`. Find the line starting with `PRUNE_EXEMPT=`. Append `,<PREFIX>-backlog`.
+Read `<BROKER_REPO>/.env`. Find the line starting with `PRUNE_EXEMPT=`. Before appending, check if `<PREFIX>-backlog` is already in the value:
+- If `<PREFIX>-backlog` is already in the value → skip, print `[setup-broker] PRUNE_EXEMPT already contains <PREFIX>-backlog, skipped`
+- Otherwise → append `,<PREFIX>-backlog` to the value and write the file back
 
 Example: `PRUNE_EXEMPT=dv-backlog,cb-backlog` → `PRUNE_EXEMPT=dv-backlog,cb-backlog,<PREFIX>-backlog`
 
