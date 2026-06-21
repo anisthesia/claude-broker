@@ -1,0 +1,428 @@
+/**
+ * test-setup-broker.js — test suite for /setup-broker slash command
+ * 38 assertions across 4 sections.
+ */
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { readFileSync, existsSync } from "fs";
+import { homedir } from "os";
+import "dotenv/config";
+
+const BROKER_URL = process.env.BROKER_URL || "http://localhost:8080/mcp";
+const SECRET     = process.env.SHARED_SECRET || "";
+
+let passed = 0;
+let failed = 0;
+
+function ok(label) {
+  console.log(`  ✓ ${label}`);
+  passed++;
+}
+
+function fail(label, detail) {
+  console.error(`  ✗ ${label}: ${detail}`);
+  failed++;
+}
+
+function assert(condition, label, detail = "") {
+  condition ? ok(label) : fail(label, detail || "assertion failed");
+}
+
+async function connect(name) {
+  const headers = SECRET ? { Authorization: `Bearer ${SECRET}` } : {};
+  const transport = new StreamableHTTPClientTransport(new URL(BROKER_URL), { requestInit: { headers } });
+  const client = new Client({ name, version: "1.0.0" });
+  await client.connect(transport);
+  return { client, transport };
+}
+
+async function call(client, tool, args) {
+  const res = await client.callTool({ name: tool, arguments: args });
+  return res.content[0].text;
+}
+
+async function run() {
+  const RUN    = Date.now();
+  const PREFIX = `sb${RUN}`;
+  console.log(`\n[test-setup-broker]  prefix=${PREFIX}  url=${BROKER_URL}\n`);
+
+  const { client: a, transport: ta } = await connect("test-setup-broker");
+
+  const REPO_COPY = `.claude/commands/setup-broker.md`;
+  const USER_COPY = `${homedir()}/.claude/commands/setup-broker.md`;
+
+  // ── 1. Command file existence ─────────────────────────────────────────────
+  console.log("1. Command file existence");
+
+  const repoContent = existsSync(REPO_COPY) ? readFileSync(REPO_COPY, "utf-8") : null;
+  assert(
+    repoContent !== null && repoContent.length > 5000,
+    `repo copy exists and has length > 5000 chars (got ${repoContent?.length ?? 0})`,
+  );
+
+  const userContent = existsSync(USER_COPY) ? readFileSync(USER_COPY, "utf-8") : null;
+  assert(
+    userContent !== null && userContent === repoContent,
+    "user copy content === repo copy content (files in sync)",
+    userContent === null ? "user copy missing" : "content mismatch",
+  );
+
+  const content = repoContent ?? "";
+
+  // ── 2. Bug-fix regressions ────────────────────────────────────────────────
+  console.log("\n2. Bug-fix regressions");
+
+  // 3
+  assert(
+    content.includes("process.env.BROKER_URL"),
+    "schema script uses process.env.BROKER_URL (not hardcoded URL)",
+  );
+
+  // 4
+  assert(
+    content.includes("process.env.BROKER_SECRET || process.env.SHARED_SECRET"),
+    "schema script has BROKER_SECRET || SHARED_SECRET fallback chain",
+  );
+
+  // 5
+  assert(
+    content.includes("BROKER_URL=<BROKER_URL> BROKER_SECRET=<BROKER_SECRET>"),
+    "remote broker watchdog commands include BROKER_URL=<BROKER_URL>",
+  );
+
+  // 6
+  assert(
+    content.includes("If BROKER_URL is localhost or 127.0.0.1"),
+    "Step 7 has local vs remote branch for watchdog commands",
+  );
+
+  // 7
+  assert(
+    /Merge logic|Merge, do not overwrite/.test(content),
+    "settings.json merge behaviour documented",
+  );
+
+  // 8
+  assert(
+    !/"env"\s*:\s*\{/.test(content),
+    'workers-broker.json template has no env block (no "env": { ... })',
+  );
+
+  // 9
+  assert(
+    content.includes("entries do not support an `env` block"),
+    "note about missing env block support present",
+  );
+
+  // 10
+  assert(
+    content.includes("settings.local.json"),
+    "remote broker routes to settings.local.json",
+  );
+
+  // ── 3. Protocol completeness ──────────────────────────────────────────────
+  console.log("\n3. Protocol completeness");
+
+  // Orchestrator template coverage
+
+  // 11
+  assert(
+    /[Tt]urn-start ritual/.test(content),
+    "orchestrator: turn-start ritual documented",
+  );
+
+  // 12
+  assert(
+    /Sprint lifecycle|Sprint close/.test(content),
+    "orchestrator: sprint lifecycle documented",
+  );
+
+  // 13
+  assert(
+    content.includes("approval-token"),
+    "orchestrator: approval-token protocol present",
+  );
+
+  // 14
+  assert(
+    /Worker stop conditions|stop conditions/.test(content),
+    "orchestrator: worker stop conditions table present",
+  );
+
+  // 15
+  assert(
+    /Liveness enforcement|liveness/.test(content),
+    "orchestrator: liveness enforcement documented",
+  );
+
+  // 16
+  assert(
+    content.includes("purge_channel"),
+    "orchestrator: purge_channel gate present",
+  );
+
+  // Worker template coverage
+
+  // 17
+  assert(
+    /every 5 min|5-min|every ~5 min/.test(content),
+    "worker: heartbeat cadence (every 5 min) specified",
+  );
+
+  // 18
+  assert(
+    content.includes("consent_basis"),
+    "worker: consent_basis required field present",
+  );
+
+  // 19
+  assert(
+    content.includes("idle-loop exit"),
+    "worker: idle-loop exit documented",
+  );
+
+  // 20
+  assert(
+    /context-rotation-before-idle-pickup|context rotation/.test(content),
+    "worker: context rotation before idle pickup documented",
+  );
+
+  // 21
+  assert(
+    content.includes("depends_on"),
+    "worker: depends_on dependency handling present",
+  );
+
+  // 22
+  assert(
+    content.includes("check_result"),
+    "worker: check_result idempotency check present",
+  );
+
+  // ── 4. Schema template functional tests ──────────────────────────────────
+  console.log("\n4. Schema template functional tests");
+
+  function adaptSchema(filename, updates) {
+    const schema = JSON.parse(readFileSync(`schemas/${filename}`, "utf-8"));
+    if (updates.title)       schema.title = updates.title;
+    if (updates.description) schema.description = updates.description;
+    if (updates.taskIdPattern && schema.properties?.task_id?.pattern) {
+      schema.properties.task_id.pattern = updates.taskIdPattern;
+    }
+    return JSON.stringify(schema);
+  }
+
+  const workerInboxSchema = adaptSchema("cb-worker-inbox.json", {
+    title: `${PREFIX} worker-inbox envelope`,
+    description: `Worker inbox messages for test project ${PREFIX}.`,
+    taskIdPattern: `^${PREFIX}-[0-9]{4}-[0-9]{2}-[0-9]{2}-.+`,
+  });
+  const orchInboxSchema = adaptSchema("cb-orchestrator-inbox.json", {
+    title: `${PREFIX} orchestrator-inbox envelope`,
+    description: `Orchestrator inbox messages for test project ${PREFIX}.`,
+  });
+  const statusSchema = adaptSchema("cb-status.json", {
+    title: `${PREFIX} status envelope`,
+    description: `Status firehose for test project ${PREFIX}.`,
+  });
+  const controlSchema = adaptSchema("cb-control.json", {
+    title: `${PREFIX} control broadcast envelope`,
+    description: `Control broadcasts for test project ${PREFIX}.`,
+  });
+  const telemetrySchema = adaptSchema("cb-telemetry.json", {
+    title: `${PREFIX} telemetry heartbeat envelope`,
+    description: `Worker heartbeats for test project ${PREFIX}.`,
+  });
+  const backlogSchema = adaptSchema("cb-backlog.json", {
+    title: `${PREFIX} backlog envelope`,
+    description: `Persistent deferred task register for ${PREFIX} namespace.`,
+  });
+
+  const channels = [
+    { channel: `${PREFIX}-orchestrator`, schema: orchInboxSchema  },
+    { channel: `${PREFIX}-control`,      schema: controlSchema    },
+    { channel: `${PREFIX}-status`,       schema: statusSchema     },
+    { channel: `${PREFIX}-telemetry`,    schema: telemetrySchema  },
+    { channel: `${PREFIX}-backlog`,      schema: backlogSchema    },
+    { channel: `${PREFIX}-api`,          schema: workerInboxSchema },
+  ];
+
+  // 23 — all 6 register calls succeed
+  let regSucceeded = 0;
+  for (const { channel, schema } of channels) {
+    const r = await a.callTool({ name: "register_channel_schema", arguments: { channel, schema, strict: false } });
+    if (!r.isError && /Registered schema/.test(r.content[0].text)) regSucceeded++;
+  }
+  assert(regSucceeded === 6, `all 6 register_channel_schema calls return without error (got ${regSucceeded}/6)`);
+
+  // 24 — list_channel_schemas includes all 6 channels
+  const listSchemas = await call(a, "list_channel_schemas", {});
+  const allPresent = channels.every(({ channel }) => listSchemas.includes(channel));
+  assert(allPresent, `list_channel_schemas includes all 6 ${PREFIX}-* channels`);
+
+  // Send valid worker-inbox message to sb${RUN}-api
+  const validTaskId  = `${PREFIX}-2026-06-21-test`;
+  const validTaskMsg = JSON.stringify({
+    type: "task",
+    task_id: validTaskId,
+    from: "orchestrator",
+    to: "api",
+    subject: "test task",
+    body: "test",
+  });
+  const sendRes25 = await call(a, "send_message", {
+    channel: `${PREFIX}-api`,
+    sender: "orchestrator",
+    content: validTaskMsg,
+  });
+
+  // 25 — returns message id, no WARN
+  assert(
+    /Sent #\d+/.test(sendRes25) && !/WARN/.test(sendRes25),
+    "send valid task to worker inbox: returns message id, no WARN",
+    sendRes25,
+  );
+
+  // 26 — read_messages returns the message
+  const readRes26 = await call(a, "read_messages", { channel: `${PREFIX}-api`, since_id: 0 });
+  assert(readRes26.includes(validTaskId), "read_messages returns the posted task");
+
+  // 27 — message content parses correctly
+  // read_messages format: "[#ID] TIMESTAMP <SENDER>: JSON_CONTENT"
+  let parsed27 = null;
+  try {
+    const firstLine = readRes26.trim().split("\n")[0];
+    const jsonStart = firstLine.indexOf("{");
+    if (jsonStart >= 0) parsed27 = JSON.parse(firstLine.slice(jsonStart));
+  } catch (e) {}
+  assert(parsed27?.type === "task", "message content parses correctly (type === 'task')", `parsed: ${JSON.stringify(parsed27)}`);
+
+  // Send valid status result to sb${RUN}-status
+  const validStatusMsg = JSON.stringify({
+    type: "result",
+    task_id: validTaskId,
+    from: "api",
+    to: "orchestrator",
+    subject: "test result",
+    summary: "PASS — test",
+  });
+  const sendRes28 = await call(a, "send_message", {
+    channel: `${PREFIX}-status`,
+    sender: "api",
+    content: validStatusMsg,
+  });
+
+  // 28 — send_message succeeds
+  assert(/Sent #\d+/.test(sendRes28), "send valid result to status channel: succeeds", sendRes28);
+
+  // 29 — read_messages returns it
+  const readRes29 = await call(a, "read_messages", { channel: `${PREFIX}-status`, since_id: 0 });
+  assert(readRes29.includes("PASS — test"), "read_messages from status channel returns posted result");
+
+  // Send invalid message (missing required task_id) to sb${RUN}-api
+  const invalidMsg = JSON.stringify({
+    type: "task",
+    from: "orchestrator",
+    to: "api",
+    subject: "bad",
+  });
+  const sendRes30 = await call(a, "send_message", {
+    channel: `${PREFIX}-api`,
+    sender: "orchestrator",
+    content: invalidMsg,
+  });
+
+  // 30 — accepted in warn-only mode
+  assert(/Sent #\d+/.test(sendRes30), "invalid message (missing task_id) accepted in warn-only mode", sendRes30);
+
+  // 31 — response includes WARN
+  assert(/WARN/.test(sendRes30), "invalid message response includes WARN schema mismatch text", sendRes30);
+
+  // Send wrong-prefix task_id to sb${RUN}-api
+  const wrongPrefixMsg = JSON.stringify({
+    type: "task",
+    task_id: "cb-2026-06-21-wrong-prefix",
+    from: "orchestrator",
+    to: "api",
+    subject: "wrong prefix test",
+    body: "test",
+  });
+  const sendRes32 = await call(a, "send_message", {
+    channel: `${PREFIX}-api`,
+    sender: "orchestrator",
+    content: wrongPrefixMsg,
+  });
+
+  // 32 — accepted (warn-only)
+  assert(/Sent #\d+/.test(sendRes32), "wrong-prefix task_id accepted in warn-only mode", sendRes32);
+
+  // 33 — response includes WARN (pattern mismatch)
+  assert(/WARN/.test(sendRes32), "wrong-prefix task_id response includes WARN schema mismatch", sendRes32);
+
+  // Send correct-prefix task_id to sb${RUN}-api
+  const correctPrefixMsg = JSON.stringify({
+    type: "task",
+    task_id: `${PREFIX}-2026-06-21-correct`,
+    from: "orchestrator",
+    to: "api",
+    subject: "correct prefix",
+    body: "test",
+  });
+  const sendRes34 = await call(a, "send_message", {
+    channel: `${PREFIX}-api`,
+    sender: "orchestrator",
+    content: correctPrefixMsg,
+  });
+
+  // 34 — accepted
+  assert(/Sent #\d+/.test(sendRes34), "correct-prefix task_id accepted", sendRes34);
+
+  // 35 — response does NOT include WARN
+  assert(!/WARN/.test(sendRes34), "correct-prefix task_id response does NOT include WARN", sendRes34);
+
+  // Clear all 6 channel schemas
+  let clearSucceeded = 0;
+  for (const { channel } of channels) {
+    const r = await a.callTool({ name: "clear_channel_schema", arguments: { channel } });
+    if (!r.isError) clearSucceeded++;
+  }
+
+  // 36 — all 6 clear calls succeed
+  assert(clearSucceeded === 6, `all 6 clear_channel_schema calls succeed (got ${clearSucceeded}/6)`);
+
+  // 37 — list_channel_schemas no longer shows any sb${RUN}-* entries
+  const listAfterClear = await call(a, "list_channel_schemas", {});
+  const nonePresent = channels.every(
+    ({ channel }) => !listAfterClear.split("\n").some(l => l.startsWith(channel + "\t")),
+  );
+  assert(nonePresent, `list_channel_schemas no longer includes any ${PREFIX}-* entries`);
+
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+  const purgeRaw = await call(a, "purge_channels_by_prefix", { prefix: PREFIX });
+  let purgeResult;
+  try { purgeResult = JSON.parse(purgeRaw.match(/\{[\s\S]*\}/)?.[0] ?? "{}"); } catch (e) { purgeResult = {}; }
+
+  // 38 — purge sb${RUN}-* channels in afterAll
+  assert(
+    typeof purgeResult.total_deleted === "number",
+    `afterAll: purge_channels_by_prefix(${PREFIX}) returns valid result`,
+    purgeRaw,
+  );
+
+  await ta.close();
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  console.log(`\n${"─".repeat(50)}`);
+  console.log(`  passed: ${passed}   failed: ${failed}`);
+  if (failed > 0) {
+    console.error("  SOME TESTS FAILED");
+    process.exit(1);
+  } else {
+    console.log("  ALL TESTS PASSED");
+  }
+}
+
+run().catch(e => {
+  console.error("\n[FATAL]", e.message || e);
+  process.exit(1);
+});
