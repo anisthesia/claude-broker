@@ -534,6 +534,63 @@ async function run() {
     "Liveness enforcement section: filter_type=result documented",
   );
 
+  // ── 6. Code-reviewer worker ───────────────────────────────────────────────
+  console.log("\n6. Code-reviewer worker");
+
+  // 55 — Step 4c.1: code-reviewer CLAUDE.md generation step present
+  assert(
+    content.includes("code-reviewer"),
+    "Step 4c.1: code-reviewer generation step present",
+  );
+
+  // 56 — reviewer template includes all three verdict values
+  assert(
+    content.includes('"approve"') && content.includes('"block"') && content.includes('"advise"'),
+    "Reviewer template: all three verdict values present (approve/block/advise)",
+  );
+
+  // 57 — reviewer template includes default checklist items
+  assert(
+    content.includes("Secrets") && content.includes("File ownership"),
+    "Reviewer template: default checklist includes Secrets and File ownership",
+  );
+
+  // 58 — reviewer is read-only
+  assert(
+    content.includes("read-only") || content.includes("do NOT write code"),
+    "Reviewer template: read-only constraint documented",
+  );
+
+  // 59 — <PREFIX>-reviewer channel in setup-schemas REGISTRATIONS
+  assert(
+    content.includes("<PREFIX>-reviewer") && content.includes("schemas/<PREFIX>-worker-inbox.json"),
+    "Step 5b: <PREFIX>-reviewer channel in setup-schemas REGISTRATIONS",
+  );
+
+  // 60 — reviewer entry in WORKERS_CONFIG template
+  assert(
+    content.includes('"name": "<PREFIX>-reviewer"'),
+    "Step 5c: reviewer entry present in WORKERS_CONFIG template",
+  );
+
+  // 61 — orchestrator sprint-close section has review gate
+  assert(
+    content.includes("Sprint close review"),
+    "Orchestrator sprint-close: review gate present (Sprint close review task)",
+  );
+
+  // 62 — orchestrator waits for reviewer result using filter_type=result
+  assert(
+    content.includes('filter_type="result"') && content.includes("reviewer"),
+    "Orchestrator sprint-close: filter_type=result used when waiting for reviewer result",
+  );
+
+  // 63 — verification checklist includes reviewer CLAUDE.md item
+  assert(
+    content.includes("code-reviewer/CLAUDE.md"),
+    "Verification checklist: code-reviewer/CLAUDE.md item present",
+  );
+
   // ── Summary ───────────────────────────────────────────────────────────────
   console.log(`\n${"─".repeat(50)}`);
   console.log(`  passed: ${passed}   failed: ${failed}`);

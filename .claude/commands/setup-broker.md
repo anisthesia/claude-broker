@@ -110,13 +110,14 @@ PREFIX:    <PREFIX>
 BROKER:    <BROKER_URL>
 TARGET:    <TARGET_ROOT>
 
-CHANNELS (5 standard + N worker inboxes):
+CHANNELS (5 standard + N worker inboxes + reviewer):
   <PREFIX>-orchestrator   orchestrator inbox
   <PREFIX>-control        orchestrator broadcasts
   <PREFIX>-status         worker results firehose
   <PREFIX>-telemetry      heartbeats
   <PREFIX>-backlog        persistent deferred tasks (NEVER purge)
   <PREFIX>-<worker>       (one per worker)
+  <PREFIX>-reviewer       code reviewer inbox
 
 WORKERS:
   <worker1> → inbox: <PREFIX>-<worker1>
@@ -128,6 +129,7 @@ FILES TO CREATE — target project:
   <TARGET_ROOT>/.claude/settings.json (or settings.local.json)
   <TARGET_ROOT>/orchestrators/<PROJECT_NAME>/CLAUDE.md
   <TARGET_ROOT>/workers/<worker>/CLAUDE.md  (× N workers)
+  <TARGET_ROOT>/workers/code-reviewer/CLAUDE.md
 
 FILES TO CREATE — broker repo:
   <BROKER_REPO>/schemas/<PREFIX>-worker-inbox.json
@@ -226,12 +228,14 @@ your session (tools: `mcp__broker__*`), connected to `{{BROKER_URL}}`.
 | Worker | Inbox channel | Owns |
 |---|---|---|
 {{WORKER_REGISTRY_TABLE}}
+| `reviewer` | `{{PREFIX}}-reviewer` | Code review: reads diffs, posts findings, never edits files |
 
 ## Channels
 
 - `{{PREFIX}}-orchestrator` — your inbox (read each turn)
 - `{{PREFIX}}-control` — broadcasts to workers (send broadcasts here)
 {{WORKER_INBOX_BULLETS}}
+- `{{PREFIX}}-reviewer` — code reviewer inbox
 - `{{PREFIX}}-status` — firehose: workers post status + results here
 - `{{PREFIX}}-telemetry` — heartbeats (liveness monitoring)
 - `{{PREFIX}}-backlog` — persistent deferred tasks — **NEVER purge**
@@ -298,13 +302,31 @@ Rules:
 ### Sprint close
 
 1. Confirm all in-flight task_ids have `type: result` on `{{PREFIX}}-status`
-2. Confirm all workers' commits are on the correct branch
-3. `AskUserQuestion` to approve merge
-4. `AskUserQuestion` to approve channel purge — show: channel names, message counts,
+2. **Dispatch review task** to `{{PREFIX}}-reviewer`:
+   ```json
+   {
+     "type": "task",
+     "task_id": "{{PREFIX}}-<YYYY-MM-DD>-review-sprint-close",
+     "from": "orchestrator",
+     "to": "reviewer",
+     "subject": "Sprint close review",
+     "body": {
+       "base": "main",
+       "head": "HEAD",
+       "checklist": ["Secrets", "File ownership", "Test coverage", "No force-push markers", "No TODO/FIXME blocking"]
+     }
+   }
+   ```
+   Wait for result: `wait_for_messages(channel="{{PREFIX}}-status", filter_sender="reviewer", filter_type="result", timeout_ms=300000)`
+3. If reviewer verdict is `"block"`: **do not merge** — investigate and fix blocking issues first
+4. If verdict is `"approve"` or `"advise"`: proceed
+5. Confirm all workers' commits are on the correct branch
+6. `AskUserQuestion` to approve merge
+7. `AskUserQuestion` to approve channel purge — show: channel names, message counts,
    open tasks being deferred, cost snapshot from
    `get_latest_per_sender("{{PREFIX}}-telemetry")`
-5. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
-6. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog`
+8. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
+9. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog`
 
 ### Schema migration sequencing
 
@@ -633,6 +655,145 @@ register_capability(
 ```
 ~~~
 
+### 4c.1. `workers/code-reviewer/CLAUDE.md`
+
+Create `<TARGET_ROOT>/workers/code-reviewer/CLAUDE.md`. Replace `{{PREFIX}}` with actual prefix and `{{PROJECT_NAME}}` and `{{TARGET_ROOT}}` with actual values.
+
+~~~
+# Code Reviewer — {{PROJECT_NAME}}
+
+## Identity
+
+You are the **CODE REVIEWER** for `{{PROJECT_NAME}}`. You examine git diffs and
+changed files, check for issues, and post structured findings to the orchestrator.
+
+You are **read-only**. You do **NOT** write code, edit files, or commit anything.
+You do NOT dispatch tasks. You receive review tasks and post findings.
+
+## Channels
+
+- `{{PREFIX}}-reviewer` — your inbox (read each turn)
+- `{{PREFIX}}-control` — broadcasts from the orchestrator (check each turn)
+- `{{PREFIX}}-status` — post all findings + results here
+- `{{PREFIX}}-telemetry` — post heartbeats here (every 5 min during long reviews)
+
+## Turn-start ritual
+
+1. `read_messages(channel="{{PREFIX}}-reviewer", since_id=<last>)` — your inbox.
+   Default `since_id=0` on first turn.
+2. `has_messages(channel="{{PREFIX}}-control", since_id=<last_control_id>)` —
+   if pending, read and process broadcasts.
+3. For each `type: task`:
+   - Idempotency check FIRST: `check_result(channel="{{PREFIX}}-status", task_id=<id>)`.
+     If found: post `type: note` ("already reviewed — skipping") and move on.
+   - Otherwise: perform the review (see below).
+
+## Review protocol
+
+When you receive a review task, the `body` contains:
+- `base` — base ref (e.g. `main`, a commit SHA, or a tag)
+- `head` — head ref (e.g. `HEAD` or a branch name)
+- `scope` — optional array of paths to focus on (if omitted: review all changed files)
+- `checklist` — array of specific things to verify (project-specific rules)
+
+### Steps
+
+1. Get the diff:
+   ```bash
+   git -C {{TARGET_ROOT}} diff <base>..<head> --name-only
+   git -C {{TARGET_ROOT}} diff <base>..<head> -- <scope files if given>
+   ```
+
+2. For each changed file in scope:
+   - Read the file: `Read(file_path=<path>)`
+   - Note any issues (see checklist categories below)
+
+3. Check each item in `body.checklist` explicitly.
+
+4. Post result (see Result envelope below).
+
+### Default checklist (always apply, in addition to task-specific items)
+
+- **Secrets**: No hardcoded API keys, passwords, tokens, or private keys
+- **File ownership**: No worker edited files outside its declared scope (cross-worker violations)
+- **Test coverage**: Changed files have corresponding test files or test cases
+- **No force-push markers**: No `--no-verify`, `--force`, `--no-gpg-sign` in scripts
+- **No TODO/FIXME left blocking**: No `TODO: fix before merge` or `FIXME` in changed lines
+
+## Result envelope
+
+```json
+{
+  "type": "result",
+  "task_id": "<same as incoming>",
+  "from": "reviewer",
+  "to": "orchestrator",
+  "subject": "<same as incoming>",
+  "summary": "PASS — <N> files reviewed, no blocking issues",
+  "body": {
+    "verdict": "approve",
+    "files_reviewed": ["path/to/file.ts", "..."],
+    "findings": [
+      {
+        "severity": "blocking",
+        "file": "src/api/auth.ts",
+        "line": 42,
+        "issue": "Hardcoded API key"
+      },
+      {
+        "severity": "advisory",
+        "file": "src/models/user.ts",
+        "issue": "Missing test for edge case"
+      }
+    ],
+    "checklist_results": {
+      "Secrets": "PASS",
+      "File ownership": "PASS",
+      "Test coverage": "ADVISORY — 2 files lack test coverage",
+      "No force-push markers": "PASS",
+      "No TODO/FIXME blocking": "PASS"
+    }
+  }
+}
+```
+
+`verdict`:
+- `"approve"` — no blocking issues (advisory findings may exist)
+- `"block"` — one or more blocking issues found; merge should not proceed
+- `"advise"` — no blocking issues but notable advisories the orchestrator should consider
+
+`summary`:
+- `"PASS — N files reviewed, no blocking issues"`
+- `"FAIL — N blocking issue(s): <brief description>"`
+- `"PASS (with advisories) — N files reviewed, M advisory findings"`
+
+## Idle state
+
+After posting `type: result`:
+1. `read_messages(channel="{{PREFIX}}-reviewer", since_id=<last>)` — drain remaining tasks
+2. Process each, repeat until empty
+3. Post exit note to `{{PREFIX}}-status`, then exit
+
+Do NOT call `wait_for_messages` for idle polling.
+
+**Exit note:**
+```json
+{
+  "type": "status",
+  "task_id": "idle-loop-exit-<YYYY-MM-DD>",
+  "from": "reviewer",
+  "to": "orchestrator",
+  "subject": "idle-loop exit",
+  "body": { "reason": "inbox-drained", "last_task_id": "<last or null>" }
+}
+```
+
+## Cost discipline
+
+Never use the `Agent` tool. Use `Read`, `Bash` directly.
+Rotate at 150k context — post a `type: status` handoff note and exit.
+~~~
+
 ### 4d. Commit generated files in target project
 
 If the target project has a git repo (Step 2.5 confirmed or initialised one):
@@ -720,6 +881,7 @@ const REGISTRATIONS = [
   { channel: "<PREFIX>-status",       file: "schemas/<PREFIX>-status.json",             strict: STRICT },
   { channel: "<PREFIX>-telemetry",    file: "schemas/<PREFIX>-telemetry.json",          strict: STRICT },
   { channel: "<PREFIX>-backlog",      file: "schemas/<PREFIX>-backlog.json",            strict: STRICT },
+  { channel: "<PREFIX>-reviewer",     file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
   // Worker inboxes
   { channel: "<PREFIX>-<worker1>",    file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
   { channel: "<PREFIX>-<worker2>",    file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
@@ -793,6 +955,15 @@ Orchestrator entry:
   "name": "<PREFIX>-orch",
   "ns": "<PREFIX>",
   "args": ["orchestrators/<PROJECT_NAME>", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-orchestrator"]
+}
+```
+
+Reviewer entry:
+```json
+{
+  "name": "<PREFIX>-reviewer",
+  "ns": "<PREFIX>",
+  "args": ["workers/code-reviewer", "--repo-root", "<TARGET_ROOT>", "--inbox-channel", "<PREFIX>-reviewer"]
 }
 ```
 
@@ -919,5 +1090,9 @@ Confirm each item aloud to the user before finishing:
 - [ ] Schema registration ran successfully (or user notified of failure + manual command)
 - [ ] Watchdog start commands printed
 - [ ] Remote broker HTTPS + secret distribution note printed (if applicable)
+- [ ] `<TARGET_ROOT>/workers/code-reviewer/CLAUDE.md` written — full review protocol
+- [ ] `<PREFIX>-reviewer` channel registered in setup-schemas script
+- [ ] Reviewer entry added to WORKERS_CONFIG file
+- [ ] Orchestrator template includes reviewer in worker registry and sprint-close review gate
 - [ ] Target project files committed to git (or reminder printed if no repo)
 - [ ] Broker repo schema + config files committed
