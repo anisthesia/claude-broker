@@ -41,7 +41,7 @@ Based on the project structure, suggest worker names. Examples:
 **Question set 2** — use `AskUserQuestion`:
 
 1. "Worker names for this project? (comma-separated, e.g. api,web,db)" — show your suggestion as the first option, Other for custom list
-2. "Broker SHARED_SECRET?" — Other (free text, user must paste it)
+2. "Broker secret?" — Other (free text; paste the SHARED_SECRET value from the broker's .env file)
 
 After step 1 you have: `PREFIX`, `BROKER_URL`, `BROKER_SECRET`, `TARGET_ROOT`, `BROKER_REPO`, `WORKERS: string[]`.
 
@@ -79,7 +79,7 @@ PREFIX:    <PREFIX>
 BROKER:    <BROKER_URL>
 TARGET:    <TARGET_ROOT>
 
-CHANNELS (8 standard + N workers):
+CHANNELS (5 standard + N worker inboxes):
   <PREFIX>-orchestrator   orchestrator inbox
   <PREFIX>-control        orchestrator broadcasts
   <PREFIX>-status         worker results firehose
@@ -687,9 +687,10 @@ async function main() {
 
   for (const { channel, file, strict } of REGISTRATIONS) {
     const schema = readFileSync(file, "utf-8");
+    const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict, version: "1.0" },
+      arguments: { channel, schema, strict: strictMode, version: "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(28)} ← ${file}`);

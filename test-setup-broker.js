@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 38 assertions across 4 sections.
+ * 43 assertions across 4 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -120,6 +120,18 @@ async function run() {
     "remote broker routes to settings.local.json",
   );
 
+  // 41 — PRUNE_EXEMPT update step present
+  assert(
+    content.includes("PRUNE_EXEMPT"),
+    "command documents PRUNE_EXEMPT .env update (Step 5d)",
+  );
+
+  // 42 — backlog channel named in PRUNE_EXEMPT context
+  assert(
+    content.includes("<PREFIX>-backlog") && content.includes("PRUNE_EXEMPT"),
+    "command names <PREFIX>-backlog in PRUNE_EXEMPT context",
+  );
+
   // ── 3. Protocol completeness ──────────────────────────────────────────────
   console.log("\n3. Protocol completeness");
 
@@ -204,10 +216,16 @@ async function run() {
 
   function adaptSchema(filename, updates) {
     const schema = JSON.parse(readFileSync(`schemas/${filename}`, "utf-8"));
-    if (updates.title)       schema.title = updates.title;
-    if (updates.description) schema.description = updates.description;
+    if (updates.title)           schema.title = updates.title;
+    if (updates.description)     schema.description = updates.description;
     if (updates.taskIdPattern && schema.properties?.task_id?.pattern) {
       schema.properties.task_id.pattern = updates.taskIdPattern;
+    }
+    if (updates.fromDescription && schema.properties?.from) {
+      schema.properties.from.description = updates.fromDescription;
+    }
+    if (updates.toDescription && schema.properties?.to) {
+      schema.properties.to.description = updates.toDescription;
     }
     return JSON.stringify(schema);
   }
@@ -216,6 +234,8 @@ async function run() {
     title: `${PREFIX} worker-inbox envelope`,
     description: `Worker inbox messages for test project ${PREFIX}.`,
     taskIdPattern: `^${PREFIX}-[0-9]{4}-[0-9]{2}-[0-9]{2}-.+`,
+    fromDescription: "Dispatcher identity: 'orchestrator'.",
+    toDescription: `Target worker: one of the ${PREFIX} project workers, or '*' for broadcast.`,
   });
   const orchInboxSchema = adaptSchema("cb-orchestrator-inbox.json", {
     title: `${PREFIX} orchestrator-inbox envelope`,
@@ -250,7 +270,7 @@ async function run() {
   // 23 — all 6 register calls succeed
   let regSucceeded = 0;
   for (const { channel, schema } of channels) {
-    const r = await a.callTool({ name: "register_channel_schema", arguments: { channel, schema, strict: false } });
+    const r = await a.callTool({ name: "register_channel_schema", arguments: { channel, schema, strict: false, version: "1.0" } });
     if (!r.isError && /Registered schema/.test(r.content[0].text)) regSucceeded++;
   }
   assert(regSucceeded === 6, `all 6 register_channel_schema calls return without error (got ${regSucceeded}/6)`);
@@ -312,8 +332,8 @@ async function run() {
     content: validStatusMsg,
   });
 
-  // 28 — send_message succeeds
-  assert(/Sent #\d+/.test(sendRes28), "send valid result to status channel: succeeds", sendRes28);
+  // 28 — send_message succeeds without WARN
+  assert(/Sent #\d+/.test(sendRes28) && !/WARN/.test(sendRes28), "send valid result to status channel: succeeds without WARN", sendRes28);
 
   // 29 — read_messages returns it
   const readRes29 = await call(a, "read_messages", { channel: `${PREFIX}-status`, since_id: 0 });
@@ -380,6 +400,27 @@ async function run() {
   // 35 — response does NOT include WARN
   assert(!/WARN/.test(sendRes34), "correct-prefix task_id response does NOT include WARN", sendRes34);
 
+  // Send wrong type ("result" not in worker-inbox enum) to sb${RUN}-api
+  const wrongTypeMsg = JSON.stringify({
+    type: "result",
+    task_id: `${PREFIX}-2026-06-21-wrong-type`,
+    from: "api",
+    to: "orchestrator",
+    subject: "wrong type test",
+    summary: "PASS — test",
+  });
+  const sendRes39 = await call(a, "send_message", {
+    channel: `${PREFIX}-api`,
+    sender: "api",
+    content: wrongTypeMsg,
+  });
+
+  // 39 — accepted (warn-only)
+  assert(/Sent #\d+/.test(sendRes39), "wrong type ('result') to worker inbox accepted in warn-only mode", sendRes39);
+
+  // 40 — response includes WARN (type not in allowed enum)
+  assert(/WARN/.test(sendRes39), "wrong type response includes WARN schema mismatch (enum violation)", sendRes39);
+
   // Clear all 6 channel schemas
   let clearSucceeded = 0;
   for (const { channel } of channels) {
@@ -407,6 +448,16 @@ async function run() {
     typeof purgeResult.total_deleted === "number",
     `afterAll: purge_channels_by_prefix(${PREFIX}) returns valid result`,
     purgeRaw,
+  );
+
+  // 43 — purge actually emptied the channels (has_messages returns pending:false)
+  const hasAfterPurge = await call(a, "has_messages", { channel: `${PREFIX}-api`, since_id: 0 });
+  let hasParsed = {};
+  try { hasParsed = JSON.parse(hasAfterPurge); } catch (e) {}
+  assert(
+    hasParsed.pending === false,
+    `afterAll: ${PREFIX}-api is empty after purge`,
+    hasAfterPurge,
   );
 
   await ta.close();
