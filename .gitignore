@@ -6,3 +6,4 @@ logs/
 .env
 *.log
 dogsvilla.db
+workers/core/.core-state.json
