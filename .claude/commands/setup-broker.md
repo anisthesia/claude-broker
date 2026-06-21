@@ -807,9 +807,11 @@ If there is no `PRUNE_EXEMPT` line: add `PRUNE_EXEMPT=<PREFIX>-backlog` at the e
 
 ### 5e. Commit broker repo changes
 
+Use the workers config file path detected in Step 5c (`<WORKERS_CONFIG_FILE>` = the `WORKERS_CONFIG` path from `.env`, or `workers-broker.json` as fallback):
+
 ```bash
 cd <BROKER_REPO>
-git add schemas/<PREFIX>-*.json setup-schemas-<PREFIX>.js workers-broker.json .env
+git add schemas/<PREFIX>-*.json setup-schemas-<PREFIX>.js <WORKERS_CONFIG_FILE> .env
 git commit -m "chore: add <PREFIX> project schemas and worker config"
 ```
 
