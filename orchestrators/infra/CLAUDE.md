@@ -29,6 +29,7 @@ root. The broker MCP server is wired into your session (tools: `mcp__broker__*`)
 |---|---|---|
 | `core` | `cb-core` | `server.js`, `package.json`, MCP tools, DB, REST, watchdog lifecycle |
 | `protocol-qa` | `cb-protocol-qa` | `schemas/`, `test-*.js`, `setup-schemas*.js`, `docs/protocol-v2.md`, `workers-*.json` |
+| `reviewer` | `cb-reviewer` | Code review: reads diffs, posts findings, never edits files |
 
 ## Channels
 
@@ -36,6 +37,7 @@ root. The broker MCP server is wired into your session (tools: `mcp__broker__*`)
 - `cb-control` — broadcasts to workers (send broadcasts here)
 - `cb-core` — core worker inbox (dispatch tasks here)
 - `cb-protocol-qa` — protocol-qa worker inbox (dispatch tasks here)
+- `cb-reviewer` — code reviewer inbox
 - `cb-status` — firehose: workers post status + results here (monitor this)
 - `cb-telemetry` — heartbeats (monitor for liveness)
 - `cb-backlog` — persistent deferred tasks — **NEVER purge**
@@ -121,12 +123,29 @@ Use this envelope shape (JSON string in `content`):
 ### Sprint close
 
 1. Confirm all in-flight task_ids have matching `type: result` on `cb-status`
-2. Confirm both workers' commits are on the right branch
-3. `AskUserQuestion` to approve merge to main
-4. `AskUserQuestion` to approve purge (show: channel names, message counts,
+2. **Dispatch review task** to `cb-reviewer`:
+   ```json
+   {
+     "type": "task",
+     "task_id": "cb-<YYYY-MM-DD>-review-sprint-close",
+     "from": "orchestrator",
+     "to": "reviewer",
+     "subject": "Sprint close review",
+     "body": {
+       "base": "main",
+       "head": "HEAD",
+       "checklist": ["Secrets", "File ownership", "Test coverage", "No force-push markers", "No TODO/FIXME blocking"]
+     }
+   }
+   ```
+   Wait for result: `wait_for_messages(channel="cb-status", filter_sender="reviewer", filter_type="result", timeout_ms=300000)`
+3. If reviewer verdict is `"block"`: **do not merge** — investigate and fix blocking issues first
+4. If verdict is `"approve"` or `"advise"`: confirm both workers' commits are on the right branch
+5. `AskUserQuestion` to approve merge to main
+6. `AskUserQuestion` to approve purge (show: channel names, message counts,
    open tasks being deferred, cost snapshot from `get_latest_per_sender("cb-telemetry")`)
-5. Dispatch deferred items to `cb-backlog` before purging
-6. Purge: `cb-core`, `cb-protocol-qa`, `cb-orchestrator`, `cb-control`,
+7. Dispatch deferred items to `cb-backlog` before purging
+8. Purge: `cb-core`, `cb-protocol-qa`, `cb-orchestrator`, `cb-control`,
    `cb-status`, `cb-telemetry`. **Never purge `cb-backlog`.**
 
 ### Schema migration sequencing
@@ -218,6 +237,9 @@ Stop via `stop_worker(name=<worker>)` — this SIGTERMs the watchdog + in-flight
 
 When waiting on a worker result, never issue a single unbounded `wait_for_messages` call:
 
+- **Always use `filter_type="result"`** when waiting for a task result — this skips notes,
+  idempotency-skip messages, idle-exit statuses, and heartbeats, waking only on actual results.
+  Example: `wait_for_messages(channel="cb-status", since_id=<last>, filter_sender=<worker>, filter_type="result", timeout_ms=300000)`
 - Break long-polls into **max 5-minute chunks** (`timeout_ms=300000`)
 - After each chunk times out, call `get_latest_per_sender("cb-telemetry")` and check heartbeat freshness
 - If a worker's last heartbeat `ts` is **>10 min old** and `state` was `"working"`, treat as **silent-death**:

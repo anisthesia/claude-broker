@@ -49,5 +49,10 @@
   { "name": "sm-contracts", "ns": "sm", "args": ["workers/contracts",        "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-contracts"] },
   { "name": "sm-backend",   "ns": "sm", "args": ["workers/backend",          "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-backend"] },
   { "name": "sm-web",       "ns": "sm", "args": ["workers/web",              "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-web"] },
-  { "name": "sm-orch",      "ns": "sm", "args": ["orchestrators/SattaMatka", "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-orchestrator"] }
+  { "name": "sm-orch",      "ns": "sm", "args": ["orchestrators/SattaMatka", "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-orchestrator"] },
+
+  { "name": "dv-reviewer", "ns": "dv", "args": ["workers/code-reviewer", "--repo-root", "/Users/anis/myprojects/dogsvilla",    "--inbox-channel", "dv-reviewer"] },
+  { "name": "rp-reviewer", "ns": "rp", "args": ["workers/code-reviewer", "--repo-root", "/Users/anis/myprojects/ridepro",      "--inbox-channel", "rp-reviewer"] },
+  { "name": "sm-reviewer", "ns": "sm", "args": ["workers/code-reviewer", "--repo-root", "/Users/anis/myprojects/SattaMatka",   "--inbox-channel", "sm-reviewer"] },
+  { "name": "cb-reviewer", "ns": "cb", "args": ["workers/code-reviewer", "--repo-root", "/Users/anis/myprojects/claude-broker", "--inbox-channel", "cb-reviewer"] }
 ]
