@@ -27,14 +27,18 @@ const TMUX_BIN                   = process.env.TMUX_BIN                         
 // Format: [{ "name": "backend", "ns": "dv", "args": ["backend"] }, ...]
 // ns is optional — if set, worker appears only on that namespace tab.
 // args are passed directly to WATCHDOG_BIN.
-let workerDefs = [];
-if (WORKERS_CONFIG) {
+function loadWorkerDefs() {
+  if (!WORKERS_CONFIG) return [];
   try {
-    workerDefs = JSON.parse(readFileSync(WORKERS_CONFIG, "utf8"));
-    console.log(`[claude-broker] loaded ${workerDefs.length} worker defs from ${WORKERS_CONFIG}`);
+    return JSON.parse(readFileSync(WORKERS_CONFIG, "utf8"));
   } catch (e) {
     console.warn(`[claude-broker] WORKERS_CONFIG load failed: ${e.message}`);
+    return [];
   }
+}
+
+if (WORKERS_CONFIG) {
+  console.log(`[claude-broker] WORKERS_CONFIG=${WORKERS_CONFIG} (hot-reload enabled)`);
 }
 
 // name → { pid, proc, startedAt }
@@ -907,8 +911,9 @@ function buildServer() {
     description: "List all workers defined in the worker config with their running state, PID, and uptime. Use this to check which watchdogs are active before starting or stopping one.",
     inputSchema: {},
   }, async () => {
-    if (!workerDefs.length) return { content: [{ type: "text", text: "(no workers configured — set WORKERS_CONFIG)" }] };
-    const lines = workerDefs.map(w => {
+    const defs = loadWorkerDefs();
+    if (!defs.length) return { content: [{ type: "text", text: "(no workers configured — set WORKERS_CONFIG)" }] };
+    const lines = defs.map(w => {
       let state;
       if (WORKERS_TMUX_SESSION) {
         const exists = tmuxWindowExists(w.name);
@@ -943,7 +948,8 @@ function buildServer() {
   }, async ({ name, model }) => {
     if (!WATCHDOG_BIN)
       return { content: [{ type: "text", text: "WATCHDOG_BIN not configured on broker — cannot start workers." }], isError: true };
-    const def = workerDefs.find(w => w.name === name);
+    const defs = loadWorkerDefs();
+    const def = defs.find(w => w.name === name);
     if (!def)
       return { content: [{ type: "text", text: `Worker "${name}" not found in config. Use list_workers to see available workers.` }], isError: true };
     if (WORKERS_TMUX_SESSION) {
@@ -1275,7 +1281,7 @@ app.post("/messages", auth, (req, res) => {
 // ── Worker control endpoints ───────────────────────────────────────────────────
 
 app.get("/workers", auth, (_req, res) => {
-  res.json(workerDefs.map(w => ({
+  res.json(loadWorkerDefs().map(w => ({
     name:      w.name,
     ns:        w.ns   || null,
     args:      w.args || [],
@@ -1288,7 +1294,7 @@ app.get("/workers", auth, (_req, res) => {
 app.post("/workers/:name/start", auth, (req, res) => {
   const { name } = req.params;
   const model = typeof req.body?.model === "string" && req.body.model.trim() ? req.body.model.trim() : undefined;
-  const def = workerDefs.find(w => w.name === name);
+  const def = loadWorkerDefs().find(w => w.name === name);
   if (!def)                    return res.status(404).json({ error: `Worker "${name}" not in config` });
   if (watchdogProcs.has(name)) return res.status(409).json({ error: `Worker "${name}" already running (pid ${watchdogProcs.get(name).pid})` });
   if (!WATCHDOG_BIN)           return res.status(503).json({ error: "WATCHDOG_BIN not configured" });
@@ -1533,7 +1539,7 @@ app.get("/dashboard", (req, res) => {
   // ── Merge configured workers not yet in telemetry or inbox lists ──────────────
   if (!isAll && WATCHDOG_BIN) {
     const coveredNames = new Set(workers.map(w => w.sender));
-    workerDefs
+    loadWorkerDefs()
       .filter(d => (!d.ns || d.ns === selectedNs) && !coveredNames.has(d.name))
       .forEach(d => workers.push({
         sender:    d.name,
@@ -1624,9 +1630,10 @@ app.get("/dashboard", (req, res) => {
     : `<table><thead><tr><th>Time</th><th>Type</th><th>From${isAll ? " / Channel" : ""} → To</th><th>Task ID</th><th>Summary</th></tr></thead><tbody>${feedRows.map(renderFeedRow).join("\n")}</tbody></table>`;
 
   // Annotate each worker with managed/running flags for Start/Stop buttons
+  const defs = loadWorkerDefs();
   workers.forEach(w => {
     w.isManaged = WATCHDOG_BIN.length > 0 &&
-                  workerDefs.some(d => d.name === w.sender && (!d.ns || d.ns === w._ns));
+                  defs.some(d => d.name === w.sender && (!d.ns || d.ns === w._ns));
     w.isRunning  = watchdogProcs.has(w.sender);
   });
 
@@ -1836,7 +1843,7 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
 </head>
 <body>
 <h1>claude-broker <span style="font-size:13px;color:#8b949e;font-weight:normal">v2.0.0</span></h1>
-<div class="meta">uptime: ${uptime} &nbsp;·&nbsp; db: ${DB_PATH} &nbsp;·&nbsp; auth: <span class="${SHARED_SECRET ? "auth-on" : "auth-off"}">${SHARED_SECRET ? "on" : "OFF"}</span>${hasActions ? ` &nbsp;·&nbsp; workers: ${workerDefs.length} configured` : ""}${live ? ' &nbsp;·&nbsp; <span style="color:#3fb950">● live (30s)</span>' : ""}</div>
+<div class="meta">uptime: ${uptime} &nbsp;·&nbsp; db: ${DB_PATH} &nbsp;·&nbsp; auth: <span class="${SHARED_SECRET ? "auth-on" : "auth-off"}">${SHARED_SECRET ? "on" : "OFF"}</span>${hasActions ? ` &nbsp;·&nbsp; workers: ${loadWorkerDefs().length} configured` : ""}${live ? ' &nbsp;·&nbsp; <span style="color:#3fb950">● live (30s)</span>' : ""}</div>
 
 <div class="config">
   <div class="config-item"><span class="config-label">Auto-prune</span><span class="config-value">every ${PRUNE_INTERVAL_MS/60000}m · max age ${PRUNE_MAX_AGE_MS/3600000}h</span></div>
