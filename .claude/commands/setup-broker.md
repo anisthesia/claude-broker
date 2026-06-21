@@ -760,9 +760,15 @@ main().catch(e => { console.error("[setup-<PREFIX>] FAIL:", e); process.exit(1);
 
 Replace all `<PREFIX>` and `<worker>` placeholders with actual values. Expand the REGISTRATIONS array with one entry per worker inbox.
 
-### 5c. Append to `workers-broker.json`
+### 5c. Append to workers config
 
-Read `<BROKER_REPO>/workers-broker.json`. It is a JSON array. Apply a name-collision guard before appending — for each entry you plan to add, check if an entry with that `name` already exists:
+First detect the correct workers config file from the broker's `.env`:
+- Read `<BROKER_REPO>/.env`
+- Find the line `WORKERS_CONFIG=<path>`
+- If present: use that path as the workers config file
+- If absent: fall back to `<BROKER_REPO>/workers-broker.json` and warn: `[setup-broker] WORKERS_CONFIG not set in .env — falling back to workers-broker.json`
+
+Then apply a name-collision guard before appending to that file. It is a JSON array — for each entry you plan to add, check if an entry with that `name` already exists:
 - If `array.some(e => e.name === newEntry.name)` → skip that entry (already present)
 - Otherwise → append it to the array
 - If all entries were skipped: print `[setup-broker] workers-broker.json — all entries already present, skipped` and do not rewrite the file
@@ -903,7 +909,7 @@ Confirm each item aloud to the user before finishing:
 - [ ] Orchestrator template includes: turn-start ritual, sprint lifecycle, stop conditions, approval-token protocol, channel layout table, worker registry
 - [ ] `<BROKER_REPO>/schemas/<PREFIX>-*.json` created (6 files)
 - [ ] `<BROKER_REPO>/setup-schemas-<PREFIX>.js` created — uses `BROKER_URL` env var (not hardcoded)
-- [ ] `<BROKER_REPO>/workers-broker.json` updated — new entries appended (no `env` block; env vars distributed via watchdog commands or broker `.env`)
+- [ ] Workers config file updated (path detected from `WORKERS_CONFIG` in broker `.env`, or `workers-broker.json` if unset) — new entries appended, name-collision guard skipped duplicates (no `env` block; env vars distributed via watchdog commands or broker `.env`)
 - [ ] `<BROKER_REPO>/.env` `PRUNE_EXEMPT` line updated to include `<PREFIX>-backlog`
 - [ ] Schema registration ran successfully (or user notified of failure + manual command)
 - [ ] Watchdog start commands printed

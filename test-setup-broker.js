@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 52 assertions across 5 sections.
+ * 53 assertions across 5 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -520,6 +520,12 @@ async function run() {
   assert(
     content.includes("already contains <PREFIX>-backlog, skipped"),
     "Step 5d: PRUNE_EXEMPT duplicate guard present",
+  );
+
+  // 53 — Step 5c detects WORKERS_CONFIG from broker .env
+  assert(
+    content.includes("WORKERS_CONFIG"),
+    "Step 5c: detects WORKERS_CONFIG path from broker .env",
   );
 
   // ── Summary ───────────────────────────────────────────────────────────────
