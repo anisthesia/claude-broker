@@ -42,10 +42,30 @@ Based on the project structure, suggest worker names. Examples:
 
 1. "Worker names for this project? (comma-separated, e.g. api,web,db)" — show your suggestion as the first option, Other for custom list
 2. "Broker secret?" — Other (free text; paste the SHARED_SECRET value from the broker's .env file)
+3. "Is this project a monorepo or do components live in separate git repos?" — options: `Monorepo` (Recommended) — all workers share TARGET_ROOT, `Multi-repo` — each worker has its own repo
 
-After step 1 you have: `PREFIX`, `BROKER_URL`, `BROKER_SECRET`, `TARGET_ROOT`, `BROKER_REPO`, `WORKERS: string[]`.
+Store result as `REPO_MODE: 'monorepo' | 'multi-repo'`.
+
+After step 1 you have: `PREFIX`, `BROKER_URL`, `BROKER_SECRET`, `TARGET_ROOT`, `BROKER_REPO`, `WORKERS: string[]`, `REPO_MODE`.
 
 Derive `PROJECT_NAME` = basename of `TARGET_ROOT` (e.g. `/Users/anis/myprojects/myapp` → `myapp`).
+In multi-repo mode, derive `PROJECT_NAME` = basename of `ORCH_REPO` instead (set after Step 1.5).
+
+---
+
+## Step 1.5 — Collect per-worker repo paths (multi-repo only)
+
+**Skip this entire step when REPO_MODE=monorepo.**
+
+When REPO_MODE=multi-repo, use `AskUserQuestion` (up to 2 questions):
+
+- Q1: "Enter the absolute repo path for each worker (one per line, format `worker: /abs/path`):" — Other (free text)
+- Q2: "Which component repo hosts the orchestrator?" — options: one option per unique repo path collected above, Other
+
+After collection define:
+- `WORKER_REPOS: { [worker]: string }` — mapping from worker name to its repo root
+- `ORCH_REPO: string` — absolute path to the repo that holds orchestrator files
+- In multi-repo mode, derive `PROJECT_NAME` = basename of `ORCH_REPO` (not `TARGET_ROOT`)
 
 ---
 
@@ -70,6 +90,10 @@ Example for a TypeScript app with workers `[api, web, db]`:
 ---
 
 ## Step 2.5 — Git preflight
+
+**If REPO_MODE=monorepo**: run the checks below as-is (single TARGET_ROOT).
+
+**If REPO_MODE=multi-repo**: loop over all unique repo paths from `[ORCH_REPO, ...Object.values(WORKER_REPOS)]` — for each repo path, check `.git` existence, offer `git init` if missing, and check/create `.gitignore` with `.claude/settings.local.json`. Apply the steps below once per repo path instead of once for TARGET_ROOT.
 
 ### Target project repo check
 
@@ -108,7 +132,14 @@ Present:
 ```
 PREFIX:    <PREFIX>
 BROKER:    <BROKER_URL>
+REPO_MODE: <monorepo|multi-repo>
 TARGET:    <TARGET_ROOT>
+# Multi-repo only — show per-component roots:
+ORCH_REPO: <ORCH_REPO>                          (orchestrator files)
+WORKER_REPOS:
+  <worker1>: /abs/path/to/repo1
+  <worker2>: /abs/path/to/repo2
+  ...
 
 CHANNELS (5 standard + N worker inboxes + reviewer):
   <PREFIX>-orchestrator   orchestrator inbox
@@ -151,6 +182,11 @@ If No: stop. If Change: re-collect the specific field and re-confirm.
 ---
 
 ## Step 4 — Generate TARGET PROJECT files
+
+**Multi-repo note**: If REPO_MODE=multi-repo, replace TARGET_ROOT with the per-component repo in each sub-step below:
+- `settings.json`: create one copy per unique repo path in `{ORCH_REPO, ...WORKER_REPOS values}` — each at `<REPO>/.claude/settings.json`
+- `orchestrators/<PROJECT_NAME>/CLAUDE.md`: in `ORCH_REPO`
+- `workers/<WORKER>/CLAUDE.md`: in `WORKER_REPOS[worker]` (not ORCH_REPO)
 
 ### 4a. `.claude/settings.json`
 
@@ -812,6 +848,18 @@ If the user declined git init in Step 2.5: skip the commit and print:
    git commit -m "chore: scaffold broker-worker arrangement via /setup-broker"
 ```
 
+If REPO_MODE=multi-repo: commit each repo separately:
+```bash
+cd <ORCH_REPO>
+git add orchestrators/ .claude/ .gitignore
+git commit -m "chore: scaffold broker-worker arrangement via /setup-broker"
+
+# For each worker repo distinct from ORCH_REPO:
+cd <WORKER_REPOS[worker]>
+git add workers/<worker>/ .claude/ .gitignore
+git commit -m "chore: scaffold broker-worker arrangement via /setup-broker"
+```
+
 ---
 
 ## Step 5 — Generate CLAUDE-BROKER REPO files
@@ -967,6 +1015,11 @@ Reviewer entry:
 }
 ```
 
+> **Note — multi-repo**: If REPO_MODE=multi-repo, use per-worker `--repo-root` in each entry:
+> - Each worker entry: `--repo-root` = `WORKER_REPOS[worker]`
+> - Orchestrator entry: `--repo-root` = `ORCH_REPO`
+> - Reviewer entry: `--repo-root` = `ORCH_REPO`
+
 > **Note — env var distribution**: `workers-broker.json` entries do not support an `env` block; the broker's `start_worker` ignores it. `BROKER_URL` and `BROKER_SECRET` must be set in the environment where the broker server runs (the broker's own `.env` file) **or** passed explicitly in the watchdog start commands printed in Step 7.
 
 ### 5d. Update `.env` PRUNE_EXEMPT
@@ -1028,6 +1081,22 @@ BROKER_SECRET=<BROKER_SECRET> \
     --inbox-channel <PREFIX>-<worker1>
 
 # (one block per additional worker)
+```
+
+If REPO_MODE=multi-repo: each worker command uses `--repo-root <WORKER_REPOS[worker]>`, orchestrator uses `--repo-root <ORCH_REPO>`:
+
+```
+# Orchestrator (multi-repo)
+BROKER_SECRET=<BROKER_SECRET> \
+  <WATCHDOG_PATH> orchestrators/<PROJECT_NAME> \
+    --repo-root <ORCH_REPO> \
+    --inbox-channel <PREFIX>-orchestrator
+
+# Worker: <worker1> (multi-repo)
+BROKER_SECRET=<BROKER_SECRET> \
+  <WATCHDOG_PATH> workers/<worker1> \
+    --repo-root <WORKER_REPOS[worker1]> \
+    --inbox-channel <PREFIX>-<worker1>
 ```
 
 **If BROKER_URL is remote (not localhost/127.0.0.1)** — prepend `BROKER_URL=<BROKER_URL>` to every command:
@@ -1096,3 +1165,8 @@ Confirm each item aloud to the user before finishing:
 - [ ] Orchestrator template includes reviewer in worker registry and sprint-close review gate
 - [ ] Target project files committed to git (or reminder printed if no repo)
 - [ ] Broker repo schema + config files committed
+
+**Multi-repo (if applicable)**:
+- [ ] Multi-repo: settings.json created in each component repo
+- [ ] Multi-repo: worker CLAUDE.md files created in their respective repos
+- [ ] Multi-repo: `--repo-root` set per-worker in workers config entries

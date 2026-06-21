@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 54 assertions across 5 sections.
+ * 72 assertions across 7 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -589,6 +589,63 @@ async function run() {
   assert(
     content.includes("code-reviewer/CLAUDE.md"),
     "Verification checklist: code-reviewer/CLAUDE.md item present",
+  );
+
+  // ── 7. Multi-repo support ─────────────────────────────────────────────────
+  console.log("\n7. Multi-repo support");
+
+  // 64 — monorepo/multi-repo question present
+  assert(
+    /[Mm]onorepo.*[Mm]ulti-repo|[Mm]ulti-repo.*[Mm]onorepo|monorepo or.*separate/i.test(content),
+    "Step 1: monorepo vs multi-repo question present",
+  );
+
+  // 65 — WORKER_REPOS or per-worker repo collection documented
+  assert(
+    /WORKER_REPOS|per-worker repo|each.*repo path/i.test(content),
+    "Multi-repo: per-worker repo path collection documented (WORKER_REPOS)",
+  );
+
+  // 66 — ORCH_REPO / orchestrator placement question documented
+  assert(
+    /ORCH_REPO|orchestrator.*repo|hosts.*orchestrator/i.test(content),
+    "Multi-repo: orchestrator repo placement documented (ORCH_REPO)",
+  );
+
+  // 67 — multi-repo git preflight loops over per-worker repos
+  assert(
+    /multi-repo.*\.git|WORKER_REPOS.*git|each.*repo.*\.git|loop.*repo/i.test(content),
+    "Step 2.5: multi-repo git preflight loops over per-worker repos",
+  );
+
+  // 68 — multi-repo: settings.json placed in each component repo
+  assert(
+    /each.*repo.*settings\.json|settings\.json.*each.*repo|per.*repo.*settings/i.test(content),
+    "Multi-repo: settings.json placed in each component repo",
+  );
+
+  // 69 — multi-repo: worker CLAUDE.md in per-worker repo
+  assert(
+    /WORKER_REPOS\[|WORKER_REPOS\[worker\].*CLAUDE|per-worker.*CLAUDE\.md/i.test(content),
+    "Multi-repo: worker CLAUDE.md created in WORKER_REPOS[worker] path",
+  );
+
+  // 70 — multi-repo: --repo-root per-worker in workers config
+  assert(
+    /WORKER_REPOS.*repo-root|repo-root.*WORKER_REPOS|per-worker.*--repo-root/i.test(content),
+    "Step 5c: multi-repo uses per-worker --repo-root in workers config entries",
+  );
+
+  // 71 — multi-repo: Step 4d commit loops over component repos
+  assert(
+    /cd.*ORCH_REPO|ORCH_REPO.*commit|each.*repo.*commit.*multi-repo/i.test(content),
+    "Step 4d: multi-repo commits in each component repo separately",
+  );
+
+  // 72 — verification checklist has multi-repo items
+  assert(
+    /Multi-repo.*applicable|Multi-repo.*settings\.json|Multi-repo.*repo-root/i.test(content),
+    "Verification checklist: multi-repo items present",
   );
 
   // ── Summary ───────────────────────────────────────────────────────────────
