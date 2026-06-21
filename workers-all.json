@@ -44,5 +44,10 @@
   { "name": "rp-android", "ns": "rp", "args": ["android",         "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-android"] },
   { "name": "rp-ios",     "ns": "rp", "args": ["ios",             "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-ios"] },
   { "name": "rp-qa",      "ns": "rp", "args": ["qa",              "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-qa"] },
-  { "name": "rp-orch",    "ns": "rp", "args": ["orchestrators",   "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-orchestrator"] }
+  { "name": "rp-orch",    "ns": "rp", "args": ["orchestrators",   "--repo-root", "/Users/anis/myprojects/ridepro", "--inbox-channel", "rp-orchestrator"] },
+
+  { "name": "sm-contracts", "ns": "sm", "args": ["workers/contracts",        "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-contracts"] },
+  { "name": "sm-backend",   "ns": "sm", "args": ["workers/backend",          "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-backend"] },
+  { "name": "sm-web",       "ns": "sm", "args": ["workers/web",              "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-web"] },
+  { "name": "sm-orch",      "ns": "sm", "args": ["orchestrators/SattaMatka", "--repo-root", "/Users/anis/myprojects/SattaMatka", "--inbox-channel", "sm-orchestrator"] }
 ]
