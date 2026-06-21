@@ -1,6 +1,6 @@
 /**
  * test-setup-broker.js — test suite for /setup-broker slash command
- * 43 assertions across 4 sections.
+ * 50 assertions across 5 sections.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -461,6 +461,54 @@ async function run() {
   );
 
   await ta.close();
+
+  // ── 5. Git management ────────────────────────────────────────────────────────
+  console.log("\n5. Git management");
+
+  // 44 — git repo check present
+  assert(
+    content.includes(".git") && (content.includes("git repo exists") || content.includes("no git repo")),
+    "Step 2.5: .git existence check present",
+  );
+
+  // 45 — git init instruction present
+  assert(
+    content.includes("git init"),
+    "Step 2.5: git init instruction present",
+  );
+
+  // 46 — .gitignore check present
+  assert(
+    content.includes(".gitignore"),
+    "Step 2.5: .gitignore check present",
+  );
+
+  // 47 — settings.local.json added to .gitignore
+  assert(
+    content.includes(".claude/settings.local.json") && content.includes(".gitignore"),
+    "Step 2.5: .claude/settings.local.json added to .gitignore",
+  );
+
+  // 48 — target project git commit step present
+  assert(
+    content.includes("git add orchestrators/ workers/") &&
+    content.includes("scaffold broker-worker arrangement via /setup-broker"),
+    "Step 4d: git commit of generated target project files present",
+  );
+
+  // 49 — broker repo git commit step present
+  assert(
+    content.includes("git add schemas/<PREFIX>-*.json") &&
+    content.includes("add <PREFIX> project schemas and worker config"),
+    "Step 5e: git commit of broker repo changes present",
+  );
+
+  // 50 — verification checklist updated with git items
+  assert(
+    content.includes("Target project files committed to git") ||
+    content.includes("committed to git"),
+    "Verification checklist includes git commit items",
+  );
 
   // ── Summary ───────────────────────────────────────────────────────────────
   console.log(`\n${"─".repeat(50)}`);

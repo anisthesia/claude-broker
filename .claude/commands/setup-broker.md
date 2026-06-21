@@ -69,6 +69,37 @@ Example for a TypeScript app with workers `[api, web, db]`:
 
 ---
 
+## Step 2.5 — Git preflight
+
+### Target project repo check
+
+```bash
+ls <TARGET_ROOT>/.git 2>/dev/null && echo "git repo exists" || echo "no git repo"
+```
+
+If **no `.git` found**: ask via `AskUserQuestion`:
+- "No git repo found in <TARGET_ROOT>. Initialize one now?"
+  - Yes (Recommended) — run `git init <TARGET_ROOT>` then continue
+  - No — print a reminder at the end: "⚠ Remember to commit the generated files before starting workers"
+
+### .gitignore check
+
+```bash
+cat <TARGET_ROOT>/.gitignore 2>/dev/null || echo "(no .gitignore)"
+```
+
+- If `.gitignore` **does not exist**: create it with this initial content:
+  ```
+  .claude/settings.local.json
+  ```
+- If `.gitignore` **exists**: check whether `.claude/settings.local.json` is already listed.
+  If not, append it:
+  ```bash
+  echo '.claude/settings.local.json' >> <TARGET_ROOT>/.gitignore
+  ```
+
+---
+
 ## Step 3 — Confirm plan
 
 Before writing any files, use `AskUserQuestion` to show the full plan:
@@ -599,6 +630,24 @@ register_capability(
 ```
 ~~~
 
+### 4d. Commit generated files in target project
+
+If the target project has a git repo (Step 2.5 confirmed or initialised one):
+
+```bash
+cd <TARGET_ROOT>
+git add orchestrators/ workers/ .claude/ .gitignore
+git commit -m "chore: scaffold broker-worker arrangement via /setup-broker"
+```
+
+If the user declined git init in Step 2.5: skip the commit and print:
+```
+⚠  No git commit made. Run the following when ready:
+   cd <TARGET_ROOT>
+   git init && git add orchestrators/ workers/ .claude/ .gitignore
+   git commit -m "chore: scaffold broker-worker arrangement via /setup-broker"
+```
+
 ---
 
 ## Step 5 — Generate CLAUDE-BROKER REPO files
@@ -742,6 +791,16 @@ Example: `PRUNE_EXEMPT=dv-backlog,cb-backlog` → `PRUNE_EXEMPT=dv-backlog,cb-ba
 
 If there is no `PRUNE_EXEMPT` line: add `PRUNE_EXEMPT=<PREFIX>-backlog` at the end.
 
+### 5e. Commit broker repo changes
+
+```bash
+cd <BROKER_REPO>
+git add schemas/<PREFIX>-*.json setup-schemas-<PREFIX>.js workers-broker.json .env
+git commit -m "chore: add <PREFIX> project schemas and worker config"
+```
+
+If the commit is empty (no changes detected — e.g. re-running setup for an existing prefix): skip silently.
+
 ---
 
 ## Step 6 — Run schema registration
@@ -841,3 +900,5 @@ Confirm each item aloud to the user before finishing:
 - [ ] Schema registration ran successfully (or user notified of failure + manual command)
 - [ ] Watchdog start commands printed
 - [ ] Remote broker HTTPS + secret distribution note printed (if applicable)
+- [ ] Target project files committed to git (or reminder printed if no repo)
+- [ ] Broker repo schema + config files committed
