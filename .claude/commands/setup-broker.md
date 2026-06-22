@@ -141,14 +141,15 @@ WORKER_REPOS:
   <worker2>: /abs/path/to/repo2
   ...
 
-CHANNELS (5 standard + N worker inboxes + reviewer):
-  <PREFIX>-orchestrator   orchestrator inbox
-  <PREFIX>-control        orchestrator broadcasts
-  <PREFIX>-status         worker results firehose
-  <PREFIX>-telemetry      heartbeats
-  <PREFIX>-backlog        persistent deferred tasks (NEVER purge)
-  <PREFIX>-<worker>       (one per worker)
-  <PREFIX>-reviewer       code reviewer inbox
+CHANNELS (6 standard + N worker inboxes + reviewer):
+  <PREFIX>-orchestrator          orchestrator inbox
+  <PREFIX>-control               orchestrator broadcasts
+  <PREFIX>-status                worker results firehose
+  <PREFIX>-telemetry             heartbeats
+  <PREFIX>-backlog               persistent deferred tasks (NEVER purge)
+  <PREFIX>-sprint-retrospective  permanent sprint history (NEVER purge)
+  <PREFIX>-<worker>              (one per worker)
+  <PREFIX>-reviewer              code reviewer inbox
 
 WORKERS:
   <worker1> → inbox: <PREFIX>-<worker1>
@@ -275,6 +276,7 @@ your session (tools: `mcp__broker__*`), connected to `{{BROKER_URL}}`.
 - `{{PREFIX}}-status` — firehose: workers post status + results here
 - `{{PREFIX}}-telemetry` — heartbeats (liveness monitoring)
 - `{{PREFIX}}-backlog` — persistent deferred tasks — **NEVER purge**
+- `{{PREFIX}}-sprint-retrospective` — permanent sprint history — **NEVER purge**
 
 ## Turn-start ritual
 
@@ -360,9 +362,10 @@ Rules:
 6. `AskUserQuestion` to approve merge
 7. `AskUserQuestion` to approve channel purge — show: channel names, message counts,
    open tasks being deferred, cost snapshot from
-   `get_latest_per_sender("{{PREFIX}}-telemetry")`
-8. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
-9. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog`
+   `get_latest_heartbeats(channel="{{PREFIX}}-telemetry")`
+8. Write sprint retrospective — `send_message(channel="{{PREFIX}}-sprint-retrospective", ...)` with sprint summary, tasks completed, and any open items being deferred
+9. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
+10. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog` and `{{PREFIX}}-sprint-retrospective`
 
 ### Schema migration sequencing
 
@@ -398,7 +401,7 @@ reuse a prior sprint's approval.
 
 ## Worker stop conditions
 
-Check after each turn-start ritual. Use `get_latest_per_sender("{{PREFIX}}-telemetry")`
+Check after each turn-start ritual. Use `get_latest_heartbeats(channel="{{PREFIX}}-telemetry")`
 for heartbeat state, `list_workers` for PID/uptime, `read_messages("{{PREFIX}}-status")`
 for result history. Stop via `stop_worker(name=<worker>)`.
 
@@ -421,7 +424,7 @@ Rules:
   idempotency skips, idle-exit statuses, and heartbeats.
   Example: `wait_for_messages(channel="{{PREFIX}}-status", since_id=<last>, filter_sender=<worker>, filter_type="result", timeout_ms=300000)`
 - Break long-polls into max 5-minute chunks (`timeout_ms=300000`)
-- After each timeout: call `get_latest_per_sender("{{PREFIX}}-telemetry")`
+- After each timeout: call `get_latest_heartbeats(channel="{{PREFIX}}-telemetry")`
 - If heartbeat `ts` is >10 min old and `state` was `"working"` → silent-death:
   1. `stop_worker(name=<worker>)`
   2. Post `type: note` to `{{PREFIX}}-status`
@@ -440,13 +443,13 @@ Rules:
 
 ```bash
 # Orchestrator
-BROKER_SECRET=<secret> \
+BROKER_SECRET=$BROKER_SECRET \
   {{WATCHDOG_PATH}} orchestrators/{{PROJECT_NAME}} \
     --repo-root {{TARGET_ROOT}} \
     --inbox-channel {{PREFIX}}-orchestrator
 
 # Each worker
-BROKER_SECRET=<secret> \
+BROKER_SECRET=$BROKER_SECRET \
   {{WATCHDOG_PATH}} workers/<worker-name> \
     --repo-root {{TARGET_ROOT}} \
     --inbox-channel {{PREFIX}}-<worker-name>
@@ -527,10 +530,12 @@ At the start of every user turn, before doing anything else:
 
 0. **Branch safety — first action every session:**
    ```bash
-   git -C {{TARGET_ROOT}} checkout worker/{{WORKER}}
+   git -C {{TARGET_ROOT}} fetch origin
+   git -C {{TARGET_ROOT}} checkout -B worker/{{WORKER}} origin/worker/{{WORKER}} 2>/dev/null || \
+     git -C {{TARGET_ROOT}} checkout -B worker/{{WORKER}} origin/main
    git -C {{TARGET_ROOT}} branch --show-current   # must print "worker/{{WORKER}}"
    ```
-   If the branch after checkout is **not** `worker/{{WORKER}}`, post `type: question` to `{{PREFIX}}-orchestrator` and stop — do not read inbox or start any task.
+   If the output is NOT `worker/{{WORKER}}`: post `type: question` to `{{PREFIX}}-status` and **STOP** — do not read inbox or start any task.
 
 1. `read_messages(channel="{{PREFIX}}-{{WORKER}}", since_id=<last>)` — your inbox.
    Default `since_id=0` on first turn of a new session.
@@ -606,7 +611,7 @@ Before picking up the next task from the inbox:
    ```bash
    git -C {{TARGET_ROOT}} branch --show-current  # must equal worker/{{WORKER}} before commit
    ```
-   Output must be `worker/{{WORKER}}`. If not, **do not stage or commit** — post `type: question` to `{{PREFIX}}-orchestrator` immediately.
+   Output must be `worker/{{WORKER}}`. If not, **do not stage or commit** — post `type: question` to `{{PREFIX}}-status` immediately.
 
 1. Run tests before committing (if this is a code task)
 2. Stage **only your files**: `git add <your files>` — NEVER `git add .` or `git add -A`
@@ -937,15 +942,16 @@ const SECRET     = process.env.BROKER_SECRET || process.env.SHARED_SECRET || "";
 const STRICT     = process.env.STRICT === "1";
 
 const REGISTRATIONS = [
-  { channel: "<PREFIX>-orchestrator", file: "schemas/<PREFIX>-orchestrator-inbox.json", strict: STRICT },
-  { channel: "<PREFIX>-control",      file: "schemas/<PREFIX>-control.json",            strict: STRICT },
-  { channel: "<PREFIX>-status",       file: "schemas/<PREFIX>-status.json",             strict: STRICT },
-  { channel: "<PREFIX>-telemetry",    file: "schemas/<PREFIX>-telemetry.json",          strict: STRICT },
-  { channel: "<PREFIX>-backlog",      file: "schemas/<PREFIX>-backlog.json",            strict: STRICT },
-  { channel: "<PREFIX>-reviewer",     file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
+  { channel: "<PREFIX>-orchestrator",         file: "schemas/<PREFIX>-orchestrator-inbox.json", strict: STRICT },
+  { channel: "<PREFIX>-control",              file: "schemas/<PREFIX>-control.json",            strict: STRICT },
+  { channel: "<PREFIX>-status",               file: "schemas/<PREFIX>-status.json",             strict: STRICT },
+  { channel: "<PREFIX>-telemetry",            file: "schemas/<PREFIX>-telemetry.json",          strict: STRICT },
+  { channel: "<PREFIX>-backlog",              file: "schemas/<PREFIX>-backlog.json",            strict: STRICT },
+  { channel: "<PREFIX>-sprint-retrospective", file: "schemas/<PREFIX>-backlog.json",            strict: STRICT },
+  { channel: "<PREFIX>-reviewer",             file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
   // Worker inboxes
-  { channel: "<PREFIX>-<worker1>",    file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
-  { channel: "<PREFIX>-<worker2>",    file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
+  { channel: "<PREFIX>-<worker1>",            file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
+  { channel: "<PREFIX>-<worker2>",            file: "schemas/<PREFIX>-worker-inbox.json",       strict: STRICT },
   // ... one entry per worker
 ];
 
@@ -1037,13 +1043,15 @@ Reviewer entry:
 
 ### 5d. Update `.env` PRUNE_EXEMPT
 
-Read `<BROKER_REPO>/.env`. Find the line starting with `PRUNE_EXEMPT=`. Before appending, check if `<PREFIX>-backlog` is already in the value:
-- If `<PREFIX>-backlog` is already in the value → skip, print `[setup-broker] PRUNE_EXEMPT already contains <PREFIX>-backlog, skipped`
-- Otherwise → append `,<PREFIX>-backlog` to the value and write the file back
+Read `<BROKER_REPO>/.env`. Find the line starting with `PRUNE_EXEMPT=`. For each of `<PREFIX>-backlog` and `<PREFIX>-sprint-retrospective`, check if it is already in the value:
+- If already present → skip that entry, print `[setup-broker] PRUNE_EXEMPT already contains <ENTRY>, skipped`
+- If not present → append `,<ENTRY>` to the value
 
-Example: `PRUNE_EXEMPT=dv-backlog,cb-backlog` → `PRUNE_EXEMPT=dv-backlog,cb-backlog,<PREFIX>-backlog`
+After processing both entries, write the file back if any changes were made.
 
-If there is no `PRUNE_EXEMPT` line: add `PRUNE_EXEMPT=<PREFIX>-backlog` at the end.
+Example: `PRUNE_EXEMPT=dv-backlog,cb-backlog` → `PRUNE_EXEMPT=dv-backlog,cb-backlog,<PREFIX>-backlog,<PREFIX>-sprint-retrospective`
+
+If there is no `PRUNE_EXEMPT` line: add `PRUNE_EXEMPT=<PREFIX>-backlog,<PREFIX>-sprint-retrospective` at the end.
 
 ### 5e. Commit broker repo changes
 
@@ -1166,10 +1174,12 @@ Confirm each item aloud to the user before finishing:
 - [ ] Worker templates include: turn-start ritual, 5-min heartbeat cadence, idle-loop exit, result envelope with `summary` + `consent_basis`
 - [ ] Worker templates include branch safety guards (step 0 in turn-start ritual and commit protocol)
 - [ ] Orchestrator template includes: turn-start ritual, sprint lifecycle, stop conditions, approval-token protocol, channel layout table, worker registry
+- [ ] Orchestrator template includes `{{PREFIX}}-sprint-retrospective` in channel layout and sprint close excludes it from purge
+- [ ] Sprint close includes step to write sprint retrospective before purge
 - [ ] `<BROKER_REPO>/schemas/<PREFIX>-*.json` created (6 files)
 - [ ] `<BROKER_REPO>/setup-schemas-<PREFIX>.js` created — uses `BROKER_URL` env var (not hardcoded)
 - [ ] Workers config file updated (path detected from `WORKERS_CONFIG` in broker `.env`, or `workers-broker.json` if unset) — new entries appended, name-collision guard skipped duplicates (no `env` block; env vars distributed via watchdog commands or broker `.env`)
-- [ ] `<BROKER_REPO>/.env` `PRUNE_EXEMPT` line updated to include `<PREFIX>-backlog`
+- [ ] `<BROKER_REPO>/.env` `PRUNE_EXEMPT` line updated to include `<PREFIX>-backlog` and `<PREFIX>-sprint-retrospective`
 - [ ] Schema registration ran successfully (or user notified of failure + manual command)
 - [ ] Watchdog start commands printed
 - [ ] Remote broker HTTPS + secret distribution note printed (if applicable)
