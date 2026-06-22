@@ -1057,7 +1057,7 @@ Reviewer entry:
 ### 5d. Update `.env` PRUNE_EXEMPT
 
 Read `<BROKER_REPO>/.env`. Find the line starting with `PRUNE_EXEMPT=`. For each of `<PREFIX>-backlog` and `<PREFIX>-sprint-retrospective`, check if it is already in the value:
-- If already present → skip that entry, print `[setup-broker] PRUNE_EXEMPT already contains <ENTRY>, skipped`
+- If already present → skip that entry, print `[setup-broker] PRUNE_EXEMPT already contains <PREFIX>-backlog, skipped` (for backlog) or `already contains <PREFIX>-sprint-retrospective, skipped` (for retrospective)
 - If not present → append `,<ENTRY>` to the value
 
 After processing both entries, write the file back if any changes were made.
