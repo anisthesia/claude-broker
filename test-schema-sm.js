@@ -251,6 +251,246 @@ async function testWorkerInbox(client) {
   await clearSchema(client, ch);
 }
 
+// ─── sm-orchestrator-inbox ───────────────────────────────────────────────────
+
+async function testOrchestratorInbox(client) {
+  console.log("\n── sm-orchestrator-inbox ──");
+  const ch = `sm-oi-test-${RUN_TAG}`;
+  const file = "schemas/sm-orchestrator-inbox.json";
+
+  let r = await registerSchema(client, ch, file, false);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "orch-inbox: schema registered warn-only");
+
+  // 1. Valid type:question with task_id/from/to/subject
+  const validQuestion = {
+    type: "question",
+    task_id: "sm-2026-06-22-oi-q1",
+    from: "contracts",
+    to: "orchestrator",
+    subject: "should I accept this clause?",
+    body: { context: "clause 7.3 looks unusual" },
+  };
+  let t = await send(client, ch, validQuestion);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "orch-inbox: valid type:question accepted, no warn", t);
+
+  // 2. Valid type:note
+  const validNote = {
+    type: "note",
+    task_id: "sm-2026-06-22-oi-n1",
+    from: "backend",
+    to: "orchestrator",
+    subject: "baseline run complete, all clear",
+  };
+  t = await send(client, ch, validNote);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "orch-inbox: valid type:note accepted, no warn", t);
+
+  // 3. Valid type:status
+  const validStatus = {
+    type: "status",
+    task_id: "sm-2026-06-22-oi-s1",
+    from: "web",
+    to: "orchestrator",
+    subject: "deployment started",
+    body: { state: "in-progress" },
+  };
+  t = await send(client, ch, validStatus);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "orch-inbox: valid type:status accepted, no warn", t);
+
+  // 4. Missing subject → warn
+  const missingSubject = {
+    type: "note",
+    task_id: "sm-2026-06-22-oi-ns",
+    from: "contracts",
+    to: "orchestrator",
+  };
+  t = await send(client, ch, missingSubject);
+  expect(/WARN/.test(t), "orch-inbox: missing subject → warn in warn-only", t);
+
+  // 5. Unknown type (type:task not allowed) → warn
+  const wrongType = {
+    type: "task",
+    task_id: "sm-2026-06-22-oi-unk",
+    from: "backend",
+    to: "orchestrator",
+    subject: "workers cannot dispatch tasks to orchestrator-inbox",
+  };
+  t = await send(client, ch, wrongType);
+  expect(/WARN/.test(t), "orch-inbox: unknown type:task → warn in warn-only", t);
+
+  // 6. Flip to strict; missing subject → rejected
+  r = await registerSchema(client, ch, file, true);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "orch-inbox: schema re-registered strict");
+
+  t = await send(client, ch, missingSubject);
+  expect(/schema validation failed/.test(t), "orch-inbox strict: missing subject rejected", t);
+
+  // 7. Strict: valid question accepted
+  t = await send(client, ch, validQuestion);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "orch-inbox strict: valid question accepted", t);
+
+  await clearSchema(client, ch);
+}
+
+// ─── sm-status ────────────────────────────────────────────────────────────────
+
+async function testStatus(client) {
+  console.log("\n── sm-status ──");
+  const ch = `sm-st-test-${RUN_TAG}`;
+  const file = "schemas/sm-status.json";
+
+  let r = await registerSchema(client, ch, file, false);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "status: schema registered warn-only");
+
+  // 1. Valid type:result with summary
+  const validResult = {
+    type: "result",
+    task_id: "sm-2026-06-22-st-r01",
+    from: "contracts",
+    to: "orchestrator",
+    subject: "partnership agreement reviewed",
+    summary: "PASS — all clauses reviewed and approved",
+    body: { consent_basis: "orchestrator-dispatch-only" },
+  };
+  let t = await send(client, ch, validResult);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:result with summary accepted, no warn", t);
+
+  // 2. type:result missing summary → warn (allOf conditional requires it)
+  const resultNoSummary = {
+    type: "result",
+    task_id: "sm-2026-06-22-st-r02",
+    from: "backend",
+    to: "orchestrator",
+    subject: "payout processor implemented",
+    body: {},
+  };
+  t = await send(client, ch, resultNoSummary);
+  expect(/WARN/.test(t), "status: type:result missing summary → warn in warn-only", t);
+  expect(/Sent #/.test(t), "status: type:result missing summary still stored in warn-only", t);
+
+  // 3. Valid type:question
+  const validQuestion = {
+    type: "question",
+    task_id: "sm-2026-06-22-st-q01",
+    from: "web",
+    to: "orchestrator",
+    subject: "should I skip the ledger migration?",
+    body: { context: "migration looks risky" },
+  };
+  t = await send(client, ch, validQuestion);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:question accepted, no warn", t);
+
+  // 4. Valid type:note
+  const validNote = {
+    type: "note",
+    task_id: "sm-2026-06-22-st-n01",
+    from: "contracts",
+    to: "orchestrator",
+    subject: "audit log updated",
+  };
+  t = await send(client, ch, validNote);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:note accepted, no warn", t);
+
+  // 5. Valid type:handoff
+  const validHandoff = {
+    type: "handoff",
+    task_id: "sm-2026-06-22-st-h01",
+    from: "backend",
+    to: "web",
+    subject: "payout API ready for frontend integration",
+    body: { api_endpoint: "/api/v1/payouts" },
+  };
+  t = await send(client, ch, validHandoff);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:handoff accepted, no warn", t);
+
+  // 6. Missing task_id → warn
+  const missingTaskId = { type: "status", from: "backend", to: "orchestrator", subject: "no id" };
+  t = await send(client, ch, missingTaskId);
+  expect(/WARN/.test(t), "status: missing task_id → warn in warn-only", t);
+
+  // 7. Flip to strict; type:result without summary → rejected
+  r = await registerSchema(client, ch, file, true);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "status: schema re-registered strict");
+
+  t = await send(client, ch, resultNoSummary);
+  expect(/schema validation failed/.test(t), "status strict: type:result without summary → rejected", t);
+
+  // 8. Strict: valid result accepted
+  t = await send(client, ch, validResult);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status strict: valid type:result with summary accepted", t);
+
+  await clearSchema(client, ch);
+}
+
+// ─── sm-telemetry ─────────────────────────────────────────────────────────────
+
+async function testTelemetry(client) {
+  console.log("\n── sm-telemetry ──");
+  const ch = `sm-tel-test-${RUN_TAG}`;
+  const file = "schemas/sm-telemetry.json";
+
+  let r = await registerSchema(client, ch, file, false);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "telemetry: schema registered warn-only");
+
+  // 1. Valid heartbeat with all required fields
+  const validHB = {
+    type: "heartbeat",
+    from: "backend",
+    ts: "2026-06-22T10:00:00Z",
+    session_id: "sess-sm-backend-001",
+    model: "claude-sonnet-4-6",
+    context: { size_tokens: 45000, tier_threshold_pct: 30.0, rotation_recommended: false },
+    activity: { state: "working", current_task_id: "sm-2026-06-22-be-001" },
+  };
+  let t = await send(client, ch, validHB);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: valid heartbeat accepted, no warn", t);
+
+  // 2. All valid sm-telemetry activity states (includes idle-exit and session-end)
+  for (const state of ["idle-exit", "blocked-on-question", "rotating", "session-end"]) {
+    const hb = { ...validHB, activity: { state } };
+    t = await send(client, ch, hb);
+    expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
+  }
+
+  // 3. Heartbeat missing context.rotation_recommended → warn
+  const missingRotation = {
+    type: "heartbeat",
+    from: "contracts",
+    ts: "2026-06-22T10:01:00Z",
+    context: { size_tokens: 20000, tier_threshold_pct: 15.0 },
+    activity: { state: "working" },
+  };
+  t = await send(client, ch, missingRotation);
+  expect(/WARN/.test(t), "telemetry: heartbeat missing context.rotation_recommended → warn", t);
+
+  // 4. Heartbeat with unknown activity.state → warn
+  const badState = { ...validHB, activity: { state: "undefined-state" } };
+  t = await send(client, ch, badState);
+  expect(/WARN/.test(t), "telemetry: unknown activity.state → warn in warn-only", t);
+
+  // 5. Missing from field → warn
+  const missingFrom = {
+    type: "heartbeat",
+    ts: "2026-06-22T10:02:00Z",
+    context: { size_tokens: 10000, tier_threshold_pct: 10.0, rotation_recommended: false },
+    activity: { state: "idle-exit" },
+  };
+  t = await send(client, ch, missingFrom);
+  expect(/WARN/.test(t), "telemetry: missing from field → warn", t);
+
+  // 6. Flip to strict; unknown state → rejected
+  r = await registerSchema(client, ch, file, true);
+  expect(/Registered schema/.test(r.content?.[0]?.text), "telemetry: schema re-registered strict");
+
+  t = await send(client, ch, badState);
+  expect(/schema validation failed/.test(t), "telemetry strict: unknown state → rejected", t);
+
+  // 7. Strict: valid heartbeat accepted
+  t = await send(client, ch, validHB);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry strict: valid heartbeat accepted", t);
+
+  await clearSchema(client, ch);
+}
+
 // ─── setup-schemas-sm.js idempotent re-run ──────────────────────────────
 
 async function testSetupIdempotency() {
@@ -288,6 +528,9 @@ async function main() {
   const { client, transport } = await connect("test-schema-sm");
 
   await testWorkerInbox(client);
+  await testOrchestratorInbox(client);
+  await testStatus(client);
+  await testTelemetry(client);
 
   await transport.close();
 
