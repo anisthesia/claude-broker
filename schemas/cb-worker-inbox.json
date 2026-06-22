@@ -49,7 +49,35 @@
       "items": { "type": "string" },
       "description": "Checklist of deliverables the worker must confirm before posting type:result."
     },
-    "refs": { "type": "array" }
+    "refs": { "type": "array" },
+    "context": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One sentence explaining why this task exists. Helps workers make judgment calls."
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "read": { "type": "array", "items": { "type": "string" } },
+        "write": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false,
+      "description": "Per-task file scope. write lists files this task is expected to modify."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "run", "pass_condition"],
+        "properties": {
+          "name": { "type": "string" },
+          "run": { "type": "string", "description": "Exact shell command to execute." },
+          "pass_condition": { "type": "string", "description": "What a passing result looks like." }
+        },
+        "additionalProperties": false
+      },
+      "description": "Executable checks with pass conditions. Replaces vague required_checks labels."
+    }
   },
   "allOf": [
     {
