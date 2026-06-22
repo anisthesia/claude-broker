@@ -584,6 +584,37 @@ Utility script: `node check-worker-health.js` detects stopped workers with pendi
 
 ---
 
+## Task Envelope Fields (v2.1)
+
+All fields accepted by the `cb-worker-inbox` schema (used by `cb-core` and `cb-protocol-qa`).
+As of sprint-021 (`cb-2026-06-22-pqa-001`), three optional fields were added: `context`, `files`, `checks`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | yes | `'task'`, `'question'`, `'note'`, `'rotate'` |
+| `task_id` | string | yes | `cb-YYYY-MM-DD-slug` |
+| `from` | string | yes | Sender identity (e.g. `'orchestrator'`) |
+| `to` | string | yes | Target worker (e.g. `'core'`, `'protocol-qa'`, `'*'`) |
+| `subject` | string | yes | Short label (≥3 chars) |
+| `context` | string | no | One sentence: why this task exists. Helps workers make judgment calls. |
+| `body` | string/object | yes (for task) | Instructions only — no duplicated acceptance_criteria |
+| `depends_on` | array | no | `task_id:worker` prerequisites that must have `type:result` on `cb-status` first |
+| `files.read` | array | no | Files the worker should read for context before starting |
+| `files.write` | array | no | Files this task is expected to modify (do not touch others) |
+| `checks` | array | no | Executable checks: `[{name, run, pass_condition}]` — prefer over `required_checks` for new tasks |
+| `required_checks` | array | no | Legacy label list (e.g. `['test', 'committed']`) — prefer `checks` for new tasks |
+| `acceptance_criteria` | array | no | Items the worker must explicitly confirm in `type:result` body |
+| `refs` | array | no | File paths for additional reference |
+
+### Dispatch rules for new tasks
+
+- Always include `context` — one sentence on motivation
+- Use `files.write` to scope what files the task modifies; prevents cross-worker contamination
+- Use `checks` (with `run` + `pass_condition`) instead of `required_checks` for new tasks
+- Keep `body` as instructions only — do not duplicate `acceptance_criteria` as a checklist
+
+---
+
 ## Open questions
 
 - **Heartbeat compaction.** At 90s cadence × 4 workers × multi-hour sprint,

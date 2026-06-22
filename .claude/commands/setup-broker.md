@@ -302,18 +302,31 @@ per channel and persist across turns.
   "from": "orchestrator",
   "to": "<worker-name>",
   "subject": "short label",
+  "context": "One sentence: why this task exists.",
   "depends_on": ["<other-task_id>:<worker>"],
-  "required_checks": ["test", "committed"],
-  "body": "full instructions\n\nAcceptance criteria:\n- [ ] <deliverable 1>\n- [ ] Tests pass\n- [ ] Committed",
+  "files": {
+    "read": ["path/to/reference-file.js"],
+    "write": ["path/to/file-to-modify.js"]
+  },
+  "checks": [
+    { "name": "test", "run": "node test-v2.js", "pass_condition": "all tests pass" },
+    { "name": "committed", "run": "git show HEAD --name-only", "pass_condition": "only owned files in commit" }
+  ],
   "acceptance_criteria": [
     "Each item the worker must explicitly confirm in their result body"
   ],
+  "body": "Full instructions — no acceptance criteria duplication here.",
   "refs": []
 }
 ```
 
 Rules:
 - `task_id` format: `{{PREFIX}}-2026-06-10-add-auth` (date + slug)
+- `context` — always include; one sentence on the motivation
+- `files.write` — list the specific files this task should modify; prevents cross-file contamination
+- `files.read` — list reference files the worker should read before starting
+- `checks` — use instead of `required_checks` for new tasks; include exact command + pass condition
+- `body` — instructions only; do NOT duplicate acceptance_criteria as a checklist in the body
 - **Always include `acceptance_criteria`** — workers must confirm every item before posting `type: result`
 - **One task = one deliverable.** Never combine a server change with schema registration — use `depends_on`
 - For code tasks: `required_checks: ["test", "committed"]`

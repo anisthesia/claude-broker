@@ -77,18 +77,31 @@ Use this envelope shape (JSON string in `content`):
   "from": "orchestrator",
   "to": "core | protocol-qa",
   "subject": "short label",
+  "context": "One sentence: why this task exists.",
   "depends_on": ["<other-task_id>:<worker>"],
-  "required_checks": ["test", "committed"],
-  "body": "full instructions\n\nAcceptance criteria (ALL must be confirmed before posting type:result):\n- [ ] <specific deliverable 1>\n- [ ] Tests pass\n- [ ] Committed",
+  "files": {
+    "read": ["path/to/reference-file.js"],
+    "write": ["path/to/file-to-modify.js"]
+  },
+  "checks": [
+    { "name": "test", "run": "node test-v2.js", "pass_condition": "all tests pass" },
+    { "name": "committed", "run": "git show HEAD --name-only", "pass_condition": "only owned files in commit" }
+  ],
   "acceptance_criteria": [
     "Each item the worker must explicitly confirm in their result body",
     "Incomplete item = post type:question, not type:result"
   ],
+  "body": "Full instructions — no acceptance criteria duplication here.",
   "refs": []
 }
 ```
 
 - `task_id` format: `cb-2026-06-10-validator-strict` (date + slug)
+- `context` — always include; one sentence on the motivation
+- `files.write` — list the specific files this task should modify; prevents cross-file contamination
+- `files.read` — list reference files the worker should read before starting
+- `checks` — use instead of `required_checks` for new tasks; include exact command + pass condition
+- `body` — instructions only; do NOT duplicate acceptance_criteria as a checklist in the body
 - **Always include `acceptance_criteria`** and embed it as a checklist at the end of `body`. Workers must confirm every item before posting `type: result`. If incomplete, they post `type: question`.
 - **Verify before closing**: when a result arrives, check that the body explicitly confirms each `acceptance_criteria` item. If any is missing, dispatch a continuation task — do NOT close the ledger entry.
 - **One task = one deliverable.** Never combine a server change with its schema registration in one task. Use `depends_on` to chain.

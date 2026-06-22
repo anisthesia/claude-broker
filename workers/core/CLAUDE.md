@@ -53,6 +53,7 @@ At the start of every user turn, before doing anything else:
    - If `depends_on` is set, verify the dependency's result is on `cb-status`.
      If not: `wait_for_messages(channel="cb-status", since_id=<last>, timeout_ms=270000)`.
      If still missing after the wait: post `type: status` saying "waiting on <dep>" and skip.
+   - **New envelope fields (optional):** If a task includes `context` — read it for motivation before starting. If it includes `files.write` — these are the specific files to modify (do not touch others). If it includes `checks` — run each `run` command and verify against `pass_condition` before posting result.
 5. If `type: question` addressed to you: answer it first — another worker is blocked.
 
 ## Idle state — on-demand (drain and exit)
