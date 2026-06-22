@@ -376,6 +376,8 @@ async function testTelemetry(client) {
     type: "heartbeat",
     from: "web",
     ts: "2026-06-22T10:01:00Z",
+    session_id: "sess-dx-web-001",
+    model: "claude-opus-4-7",
     context: { size_tokens: 30000, tier_threshold_pct: 20.0 },
     activity: { state: "working" },
   };

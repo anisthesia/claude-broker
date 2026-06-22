@@ -1387,16 +1387,16 @@ async function run() {
   {
     const wsCh = ` cov-${RUN}-ws-ch`;
     const r = await callRaw(a, "send_message", { channel: wsCh, sender: "x", content: "whitespace-channel-test" });
-    // broker accepts it (minLength:1 passes for " ...") — just must not crash
+    // broker accepts channels with leading whitespace without crashing
     assert(
-      !r.isError || r.isError === true,  // either accepted or schema-rejected — no 500
-      `send_message: leading-whitespace channel handled without crash (got: ${r.content?.[0]?.text?.slice(0, 80)})`
+      !r.isError,
+      `send_message: leading-whitespace channel accepted without crash (got: ${r.content?.[0]?.text?.slice(0, 80)})`
     );
     // clean up if it was stored
     if (!r.isError) {
       await call(a, "purge_channel", { channel: wsCh }).catch(() => {});
     }
-    ok("send_message: leading-whitespace channel does not crash the broker");
+    ok("send_message: leading-whitespace channel stored with exact name (including whitespace)");
   }
 
   // ── 38. wait_for_messages filter_type skips non-matching ─────────────────────
