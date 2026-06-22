@@ -35,7 +35,7 @@ const REGISTRATIONS = [
   { channel: "rp-control",      file: "schemas/rp-control.json",            strict: true  },
   { channel: "rp-telemetry",    file: "schemas/rp-telemetry.json",          strict: true  },
   { channel: "rp-backlog",      file: "schemas/rp-backlog.json",            strict: true  },
-  { channel: "rp-reviewer",     file: "schemas/reviewer-inbox.json",        strict: false },
+  { channel: "rp-reviewer",     file: "schemas/reviewer-inbox.json",        strict: true  },
 ];
 
 async function main() {

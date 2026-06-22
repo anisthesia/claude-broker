@@ -25,8 +25,7 @@ const REGISTRATIONS = [
   { channel: "sm-contracts",    file: "schemas/sm-worker-inbox.json",       strict: STRICT },
   { channel: "sm-backend",      file: "schemas/sm-worker-inbox.json",       strict: STRICT },
   { channel: "sm-web",          file: "schemas/sm-worker-inbox.json",       strict: STRICT },
-  // Reviewer inbox (warn-only; strict flip deferred to sprint-024)
-  { channel: "sm-reviewer",     file: "schemas/reviewer-inbox.json",        strict: false },
+  { channel: "sm-reviewer",     file: "schemas/reviewer-inbox.json",        strict: true },
 ];
 
 async function main() {
