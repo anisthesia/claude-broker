@@ -78,7 +78,35 @@
       "description": "Checklist of deliverables the worker must confirm before posting type:result."
     },
     "body": {},
-    "refs": { "type": "array" }
+    "refs": { "type": "array" },
+    "context": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One sentence explaining why this task exists."
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "read": { "type": "array", "items": { "type": "string" } },
+        "write": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false,
+      "description": "Per-task file scope."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "run", "pass_condition"],
+        "properties": {
+          "name": { "type": "string" },
+          "run": { "type": "string" },
+          "pass_condition": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "description": "Executable checks with pass conditions."
+    }
   },
   "allOf": [
     {

@@ -255,6 +255,72 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, fullEnvelope);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: full envelope with acceptance_criteria + affected_files accepted, no warn", t);
 
+  // new-a. Valid task WITH context + files (read+write) + checks (one item) → PASS
+  const taskWithNewFields = {
+    type: "task",
+    task_id: "rp-2026-06-22-wi-new-a",
+    from: "orchestrator",
+    to: "api",
+    subject: "task with context files and checks",
+    body: "do the work",
+    context: "Propagating new envelope fields from cb-worker-inbox to rp namespace.",
+    files: { read: ["schemas/rp-worker-inbox.json"], write: ["test-schema-rp.js"] },
+    checks: [{ name: "tests pass", run: "node test-schema-rp.js", pass_condition: "ALL TESTS PASSED" }],
+  };
+  t = await send(client, ch, taskWithNewFields);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox new-a: task with context+files+checks accepted, no warn", t);
+
+  // new-b. Valid task WITHOUT new fields → backward compat, should still PASS
+  const taskWithoutNewFields = {
+    type: "task",
+    task_id: "rp-2026-06-22-wi-new-b",
+    from: "orchestrator",
+    to: "web",
+    subject: "plain task no new fields",
+    body: "run tests",
+  };
+  t = await send(client, ch, taskWithoutNewFields);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox new-b: task without new fields still accepted (backward compat)", t);
+
+  // new-c. checks item missing pass_condition → WARN (schema violation)
+  const taskChecksMissingPassCond = {
+    type: "task",
+    task_id: "rp-2026-06-22-wi-new-c",
+    from: "orchestrator",
+    to: "api",
+    subject: "checks without pass_condition",
+    body: "do thing",
+    checks: [{ name: "run tests", run: "node test-schema-rp.js" }],
+  };
+  t = await send(client, ch, taskChecksMissingPassCond);
+  expect(/WARN/.test(t), "worker-inbox new-c: checks item missing pass_condition → warn in warn-only", t);
+
+  // new-d. files with extra property beyond read/write → WARN
+  const taskFilesExtraProp = {
+    type: "task",
+    task_id: "rp-2026-06-22-wi-new-d",
+    from: "orchestrator",
+    to: "api",
+    subject: "files with extra property",
+    body: "do thing",
+    files: { read: [], write: [], execute: ["script.sh"] },
+  };
+  t = await send(client, ch, taskFilesExtraProp);
+  expect(/WARN/.test(t), "worker-inbox new-d: files with extra property → warn in warn-only", t);
+
+  // new-e. context set to empty string → WARN (minLength:1)
+  const taskEmptyContext = {
+    type: "task",
+    task_id: "rp-2026-06-22-wi-new-e",
+    from: "orchestrator",
+    to: "api",
+    subject: "empty context string",
+    body: "do thing",
+    context: "",
+  };
+  t = await send(client, ch, taskEmptyContext);
+  expect(/WARN/.test(t), "worker-inbox new-e: context set to empty string → warn (minLength:1)", t);
+
   // 16. Flip to strict; missing task_id → rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "worker-inbox: schema re-registered strict");
