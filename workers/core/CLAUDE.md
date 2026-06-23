@@ -53,7 +53,13 @@ At the start of every user turn, before doing anything else:
    - If `depends_on` is set, verify the dependency's result is on `cb-status`.
      If not: `wait_for_messages(channel="cb-status", since_id=<last>, timeout_ms=270000)`.
      If still missing after the wait: post `type: status` saying "waiting on <dep>" and skip.
-   - **New envelope fields (optional):** If a task includes `context` — read it for motivation before starting. If it includes `files.write` — these are the specific files to modify (do not touch others). If it includes `checks` — run each `run` command and verify against `pass_condition` before posting result.
+   - **Read envelope fields before starting:**
+     - `context` + `background` — motivation and deeper context; read both before touching any file
+     - `constraints` — per-task "do NOT" rules; obey every item even if they conflict with your defaults
+     - `files.write` — only modify files listed here; do not touch others
+     - `scope` — `"small"` (<30 min) / `"medium"` (30-90 min) / `"large"` (>90 min, plan for context rotation mid-task)
+     - `checks` — run each `run` command and verify against `pass_condition` before posting result
+     - `result_template` — if present, use as skeleton for your result body; fill in actual values
 5. If `type: question` addressed to you: answer it first — another worker is blocked.
 
 ## Idle state — on-demand (drain and exit)

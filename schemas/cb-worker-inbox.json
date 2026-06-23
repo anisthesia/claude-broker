@@ -77,6 +77,26 @@
         "additionalProperties": false
       },
       "description": "Executable checks with pass conditions. Replaces vague required_checks labels."
+    },
+    "background": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional 2-3 sentences of deeper context — prior decisions, related tasks, what failed before."
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["small", "medium", "large"],
+      "description": "Complexity hint: small (<30 min), medium (30-90 min), large (>90 min, expect context rotation)."
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Per-task do-NOT rules the worker must obey even when they conflict with defaults."
+    },
+    "result_template": {
+      "type": "object",
+      "description": "Skeleton JSON the worker fills in for the result body; ensures required fields are present.",
+      "additionalProperties": true
     }
   },
   "allOf": [

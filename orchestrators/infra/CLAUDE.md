@@ -78,11 +78,17 @@ Use this envelope shape (JSON string in `content`):
   "to": "core | protocol-qa",
   "subject": "short label",
   "context": "One sentence: why this task exists.",
+  "background": "Optional: 2-3 sentences of deeper context — prior decisions, related tasks, what failed before.",
+  "scope": "small | medium | large",
   "depends_on": ["<other-task_id>:<worker>"],
   "files": {
     "read": ["path/to/reference-file.js"],
     "write": ["path/to/file-to-modify.js"]
   },
+  "constraints": [
+    "Do NOT touch files outside files.write",
+    "Do NOT restart the broker unless this task explicitly requires it"
+  ],
   "checks": [
     { "name": "test", "run": "node test-v2.js", "pass_condition": "all tests pass" },
     { "name": "committed", "run": "git show HEAD --name-only", "pass_condition": "only owned files in commit" }
@@ -91,6 +97,11 @@ Use this envelope shape (JSON string in `content`):
     "Each item the worker must explicitly confirm in their result body",
     "Incomplete item = post type:question, not type:result"
   ],
+  "result_template": {
+    "required_checks": { "test": "PASS|FAIL (...)", "committed": "PASS|FAIL" },
+    "commits": [{ "sha": "...", "branch": "main", "message": "..." }],
+    "consent_basis": "orchestrator-dispatch-only"
+  },
   "body": "Full instructions — no acceptance criteria duplication here.",
   "refs": []
 }
@@ -98,9 +109,13 @@ Use this envelope shape (JSON string in `content`):
 
 - `task_id` format: `cb-2026-06-10-validator-strict` (date + slug)
 - `context` — always include; one sentence on the motivation
+- `background` — optional; 2-3 sentences on prior decisions or failures that inform this task
+- `scope` — always include: `"small"` (<30 min), `"medium"` (30-90 min), `"large"` (>90 min, worker should plan for context rotation)
+- `constraints` — per-task "do NOT" rules; worker must obey every item even when they conflict with defaults
 - `files.write` — list the specific files this task should modify; prevents cross-file contamination
 - `files.read` — list reference files the worker should read before starting
 - `checks` — use instead of `required_checks` for new tasks; include exact command + pass condition
+- `result_template` — skeleton JSON the worker fills in; ensures result body has all required fields
 - `body` — instructions only; do NOT duplicate acceptance_criteria as a checklist in the body
 - **Always include `acceptance_criteria`** and embed it as a checklist at the end of `body`. Workers must confirm every item before posting `type: result`. If incomplete, they post `type: question`.
 - **Verify before closing**: when a result arrives, check that the body explicitly confirms each `acceptance_criteria` item. If any is missing, dispatch a continuation task — do NOT close the ledger entry.

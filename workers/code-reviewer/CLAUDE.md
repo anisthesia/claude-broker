@@ -25,6 +25,7 @@ You do NOT dispatch tasks. You receive review tasks and post findings.
    - Idempotency check FIRST: `check_result(channel="cb-status", task_id=<id>)`.
      If found: post `type: note` ("already reviewed — skipping") and move on.
    - Otherwise: perform the review (see below).
+   - **Read envelope fields before reviewing:** `context` + `background` (read for motivation and context before starting); `scope` (calibrate depth: `"large"` means the change set is complex, review accordingly).
 
 ## Review protocol
 
