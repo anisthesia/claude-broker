@@ -811,12 +811,141 @@ async function run() {
     // Already deregistered or error is OK here (cleanup phase)
   }
 
+  // ── 21. Extended coverage ────────────────────────────────────────────────────
+  console.log("\n21. Extended coverage");
+
+  // Gap 1: upsert_heartbeat deduplication
+  const ext_hb_dedup = `test-ext-hb-dedup-${Date.now()}`;
+  await call(a, "upsert_heartbeat", {
+    channel: ext_hb_dedup,
+    sender: "sender-1",
+    content: JSON.stringify({ v: 1 }),
+  });
+  await call(a, "upsert_heartbeat", {
+    channel: ext_hb_dedup,
+    sender: "sender-1",
+    content: JSON.stringify({ v: 2 }),
+  });
+  await call(a, "upsert_heartbeat", {
+    channel: ext_hb_dedup,
+    sender: "sender-1",
+    content: JSON.stringify({ v: 3 }),
+  });
+  const hb_dedup_raw = await call(a, "get_latest_per_sender", { channel: ext_hb_dedup });
+  const hb_dedup_lines = hb_dedup_raw.trim().split("\n").filter(l => l.trim());
+  assert(hb_dedup_lines.length === 1, `upsert_heartbeat dedup: exactly 1 entry (got ${hb_dedup_lines.length})`);
+  assert(hb_dedup_raw.includes('"v":3') && !hb_dedup_raw.includes('"v":1') && !hb_dedup_raw.includes('"v":2'),
+    "upsert_heartbeat dedup: only latest heartbeat returned (v:3)");
+
+  // Gap 2: sprint_summary with control_channel
+  const ext_ss_ctrl = `test-ext-ss-ctrl-${Date.now()}`;
+  const ext_ss_status = `test-ext-ss-status-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_ss_status, sender: "w", content: JSON.stringify({ type: "result", task_id: "t1" }) });
+  await call(a, "send_message", { channel: ext_ss_ctrl, sender: "orch", content: JSON.stringify({ type: "note", subject: "sprint-001", body: "sprint boundary" }) });
+  const ss_ctrl_raw = await call(a, "sprint_summary", { status_channel: ext_ss_status, control_channel: ext_ss_ctrl });
+  const ss_ctrl_result = JSON.parse(ss_ctrl_raw);
+  assert(ss_ctrl_result.sprint !== null && ss_ctrl_result.sprint !== undefined, "sprint_summary with control_channel: sprint is not null");
+  assert(ss_ctrl_result.sprint.subject === "sprint-001", `sprint_summary: subject matches ('sprint-001', got '${ss_ctrl_result.sprint.subject}')`);
+
+  // Gap 3: purge_channels_by_prefix with older_than_ms
+  const ext_pfx_ch1 = `test-ext-pfx-prune1-${Date.now()}`;
+  const ext_pfx_ch2 = `test-ext-pfx-prune2-${Date.now()}`;
+  const ext_purge_prefix = "test-ext-pfx-prune";
+  await call(a, "send_message", { channel: ext_pfx_ch1, sender: "x", content: "old1" });
+  await call(a, "send_message", { channel: ext_pfx_ch2, sender: "x", content: "old2" });
+  await new Promise(r => setTimeout(r, 200));
+  await call(a, "send_message", { channel: ext_pfx_ch1, sender: "x", content: "new1" });
+  await call(a, "send_message", { channel: ext_pfx_ch2, sender: "x", content: "new2" });
+  await call(a, "purge_channels_by_prefix", { prefix: ext_purge_prefix, older_than_ms: 100 });
+  const after_pfx_prune1 = await call(a, "read_messages", { channel: ext_pfx_ch1, since_id: 0 });
+  const after_pfx_prune2 = await call(a, "read_messages", { channel: ext_pfx_ch2, since_id: 0 });
+  assert(!after_pfx_prune1.includes("old1") && after_pfx_prune1.includes("new1"),
+    "purge_channels_by_prefix older_than_ms: old msg removed, new msg kept (ch1)");
+  assert(!after_pfx_prune2.includes("old2") && after_pfx_prune2.includes("new2"),
+    "purge_channels_by_prefix older_than_ms: old msg removed, new msg kept (ch2)");
+
+  // Gap 4: purge_channel full purge
+  const ext_purge_full = `test-ext-purge-full-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_purge_full, sender: "x", content: "msg1" });
+  await call(a, "send_message", { channel: ext_purge_full, sender: "x", content: "msg2" });
+  await call(a, "purge_channel", { channel: ext_purge_full });
+  const after_full_purge = await call(a, "read_messages", { channel: ext_purge_full, since_id: 0 });
+  assert(after_full_purge.includes("No new messages"), "purge_channel full purge: returns 'No new messages' after purge");
+
+  // Gap 5: sprint_file_conflicts with since_id filtering
+  const ext_sfc_since = `test-ext-sfc-since-${Date.now()}`;
+  const msg1 = await call(a, "send_message", { channel: ext_sfc_since, sender: "worker-1", content: JSON.stringify({ type: "result", task_id: "t1", summary: "PASS", affected_files: ["file-x.ts"] }) });
+  const id1 = Number(msg1.match(/#(\d+)/)?.[1]);
+  await call(a, "send_message", { channel: ext_sfc_since, sender: "worker-1", content: JSON.stringify({ type: "result", task_id: "t2", summary: "PASS", affected_files: ["file-x.ts"] }) });
+  const sfc_since_raw = await call(a, "sprint_file_conflicts", { status_channel: ext_sfc_since, since_id: id1 });
+  const sfc_since_result = JSON.parse(sfc_since_raw);
+  assert(sfc_since_result.conflicts.length === 0, `sprint_file_conflicts with since_id: no conflicts (first result excluded, got ${sfc_since_result.conflicts.length})`);
+
+  // Gap 6: sprint_file_conflicts no-conflict clean case
+  const ext_sfc_clean = `test-ext-sfc-clean-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_sfc_clean, sender: "worker-a", content: JSON.stringify({ type: "result", task_id: "ta", summary: "PASS — done", affected_files: ["file-a.ts"] }) });
+  await call(a, "send_message", { channel: ext_sfc_clean, sender: "worker-b", content: JSON.stringify({ type: "result", task_id: "tb", summary: "PASS — done", affected_files: ["file-b.ts"] }) });
+  const sfc_clean_raw = await call(a, "sprint_file_conflicts", { status_channel: ext_sfc_clean });
+  const sfc_clean_result = JSON.parse(sfc_clean_raw);
+  assert(sfc_clean_result.conflicts.length === 0, `sprint_file_conflicts no-conflict: conflicts.length===0 (got ${sfc_clean_result.conflicts.length})`);
+  assert(sfc_clean_result.clean_count === 2, `sprint_file_conflicts no-conflict: clean_count===2 (got ${sfc_clean_result.clean_count})`);
+  assert(sfc_clean_result.summary.includes("safe"), "sprint_file_conflicts no-conflict: summary includes 'safe'");
+
+  // Gap 7: sprint_file_conflicts SKIP filtering
+  const ext_sfc_skip = `test-ext-sfc-skip-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_sfc_skip, sender: "worker-1", content: JSON.stringify({ type: "result", task_id: "t-skip", summary: "SKIP — idempotent", affected_files: ["skip-file.ts"] }) });
+  await call(a, "send_message", { channel: ext_sfc_skip, sender: "worker-2", content: JSON.stringify({ type: "result", task_id: "t-norm", summary: "PASS — done", affected_files: ["skip-file.ts"] }) });
+  const sfc_skip_raw = await call(a, "sprint_file_conflicts", { status_channel: ext_sfc_skip });
+  const sfc_skip_result = JSON.parse(sfc_skip_raw);
+  assert(sfc_skip_result.conflicts.length === 0, `sprint_file_conflicts SKIP filter: conflicts empty after filtering (got ${sfc_skip_result.conflicts.length})`);
+
+  // Gap 8: check_result summary field
+  const ext_cr_summary = `test-ext-cr-summary-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_cr_summary, sender: "w", content: JSON.stringify({ type: "result", task_id: "summary-test", summary: "PASS — all good" }) });
+  const cr_summary_raw = await call(a, "check_result", { channel: ext_cr_summary, task_id: "summary-test" });
+  const cr_summary_result = JSON.parse(cr_summary_raw);
+  assert(cr_summary_result.summary === "PASS — all good", `check_result summary: summary field matches (got '${cr_summary_result.summary}')`);
+
+  // Gap 9: get_latest_heartbeats empty channel
+  const ext_hb_empty = `test-ext-hb-empty-${Date.now()}`;
+  const hb_empty_raw = await call(a, "get_latest_heartbeats", { channel: ext_hb_empty });
+  const hb_empty_result = JSON.parse(hb_empty_raw);
+  assert(Array.isArray(hb_empty_result.workers), "get_latest_heartbeats empty: workers is an array");
+  assert(hb_empty_result.workers.length === 0, `get_latest_heartbeats empty: workers array empty (got ${hb_empty_result.workers.length})`);
+  assert(hb_empty_result.summary.total_workers === 0, `get_latest_heartbeats empty: total_workers===0 (got ${hb_empty_result.summary.total_workers})`);
+
+  // Gap 10: list_channel_schemas with prefix
+  const ext_schema_pfx1 = `test-ext-pfx1-ch-${Date.now()}`;
+  const ext_schema_pfx2 = `test-ext-pfx2-ch-${Date.now()}`;
+  await call(a, "register_channel_schema", { channel: ext_schema_pfx1, schema: JSON.stringify({ type: "object" }), strict: false });
+  await call(a, "register_channel_schema", { channel: ext_schema_pfx2, schema: JSON.stringify({ type: "object" }), strict: false });
+  const list_schemas_raw = await call(a, "list_channel_schemas", { prefix: "test-ext-pfx1-" });
+  assert(list_schemas_raw.includes(ext_schema_pfx1), "list_channel_schemas prefix: first channel listed");
+  assert(!list_schemas_raw.includes(ext_schema_pfx2), "list_channel_schemas prefix: second channel not listed (different prefix)");
+
+  // Gap 11: register_channel_schema with version
+  const ext_schema_ver = `test-ext-schema-ver-${Date.now()}`;
+  await call(a, "register_channel_schema", { channel: ext_schema_ver, schema: JSON.stringify({ type: "object" }), strict: false, version: "2.0" });
+  const get_schema_ver_raw = await call(a, "get_channel_schema", { channel: ext_schema_ver });
+  assert(get_schema_ver_raw.includes("Version: 2.0") || get_schema_ver_raw.includes("2.0"), `register_channel_schema version: response includes version (got ${get_schema_ver_raw.substring(0, 100)})`);
+
+  // Gap 12: read_messages with limit
+  const ext_read_limit = `test-ext-read-limit-${Date.now()}`;
+  await call(a, "send_message", { channel: ext_read_limit, sender: "x", content: "msg1" });
+  await call(a, "send_message", { channel: ext_read_limit, sender: "x", content: "msg2" });
+  await call(a, "send_message", { channel: ext_read_limit, sender: "x", content: "msg3" });
+  await call(a, "send_message", { channel: ext_read_limit, sender: "x", content: "msg4" });
+  await call(a, "send_message", { channel: ext_read_limit, sender: "x", content: "msg5" });
+  const read_limit_raw = await call(a, "read_messages", { channel: ext_read_limit, since_id: 0, limit: 3 });
+  const read_limit_count = (read_limit_raw.match(/\[#\d+\]/g) || []).length;
+  assert(read_limit_count === 3, `read_messages with limit: exactly 3 messages returned (got ${read_limit_count})`);
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
-  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch, bch1, bch2, crbch, gpsInbox, tsInbox, tsCtrl, tsCtrl2, ssStatus, sfcStatus]) {
+  for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch, bch1, bch2, crbch, gpsInbox, tsInbox, tsCtrl, tsCtrl2, ssStatus, sfcStatus, ext_hb_dedup, ext_ss_ctrl, ext_ss_status, ext_pfx_ch1, ext_pfx_ch2, ext_purge_full, ext_sfc_since, ext_sfc_clean, ext_sfc_skip, ext_cr_summary, ext_hb_empty, ext_schema_pfx1, ext_schema_pfx2, ext_schema_ver, ext_read_limit]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
   }
   // clear any schemas registered on test channels (safety net if test fails mid-run)
-  for (const c of [ssch, ssch2]) {
+  for (const c of [ssch, ssch2, ext_schema_pfx1, ext_schema_pfx2, ext_schema_ver]) {
     await call(a, "clear_channel_schema", { channel: c }).catch(() => {});
   }
   // afterAll: prefix-based sweep catches any channels missed above
