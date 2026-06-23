@@ -8,7 +8,7 @@ import { z } from "zod";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { spawn, spawnSync } from "child_process";
-import { readFileSync, mkdirSync, createWriteStream, openSync, closeSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, createWriteStream, openSync, closeSync } from "fs";
 
 const PORT               = Number(process.env.PORT)                   || 8080;
 const SHARED_SECRET      = process.env.SHARED_SECRET                  || "";
@@ -1211,6 +1211,72 @@ function buildServer() {
     } catch (e) {
       watchdogProcs.delete(name);
       return { content: [{ type: "text", text: `kill failed: ${e.message}` }], isError: true };
+    }
+  });
+
+  // ── register_worker ──────────────────────────────────────────────────────────
+  server.registerTool("register_worker", {
+    title: "Register a new worker in WORKERS_CONFIG",
+    description: "Add or update a worker definition in WORKERS_CONFIG. Constructs the args array from provided parameters and performs an atomic upsert: if a worker with the same name exists, it is replaced; otherwise a new entry is appended. No broker restart is required — the next worker start will use the updated definition.",
+    inputSchema: {
+      name: z.string().min(1).describe("Worker name, e.g. 'backend', 'qa-reviewer'."),
+      ns: z.string().min(1).describe("Namespace, e.g. 'dv', 'rp', 'cb' — used for tab organization in multi-session dashboards."),
+      worker_dir: z.string().min(1).describe("Worker directory path relative to repo_root, e.g. 'workers/backend' or 'orchestrators/infra'."),
+      repo_root: z.string().min(1).describe("Absolute path to the repository root, e.g. '/Users/anis/myprojects/myrepo'."),
+      inbox_channel: z.string().min(1).describe("Channel name for worker inbox, e.g. 'dv-backend' or 'cb-core'."),
+    },
+  }, async ({ name, ns, worker_dir, repo_root, inbox_channel }) => {
+    if (!WORKERS_CONFIG)
+      return { content: [{ type: "text", text: "Error: WORKERS_CONFIG env var not set" }], isError: true };
+
+    try {
+      let defs = JSON.parse(readFileSync(WORKERS_CONFIG, "utf8"));
+      const idx = defs.findIndex(w => w.name === name);
+      const entry = { name, ns, args: [worker_dir, "--repo-root", repo_root, "--inbox-channel", inbox_channel] };
+
+      if (idx >= 0) {
+        defs[idx] = entry;
+      } else {
+        defs.push(entry);
+      }
+
+      writeFileSync(WORKERS_CONFIG, JSON.stringify(defs, null, 2) + "\n", "utf8");
+      console.log(`[claude-broker] registered worker "${name}" in WORKERS_CONFIG`);
+      return { content: [{ type: "text", text: JSON.stringify({ registered: { name, ns, args: entry.args } }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+    }
+  });
+
+  // ── deregister_worker ────────────────────────────────────────────────────────
+  server.registerTool("deregister_worker", {
+    title: "Remove a worker from WORKERS_CONFIG",
+    description: "Remove a worker definition from WORKERS_CONFIG. Errors if the worker is currently running (must stop it first). The file is updated atomically; no broker restart required.",
+    inputSchema: {
+      name: z.string().min(1).describe("Worker name to remove, e.g. 'backend', 'qa-reviewer'."),
+    },
+  }, async ({ name }) => {
+    if (!WORKERS_CONFIG)
+      return { content: [{ type: "text", text: "Error: WORKERS_CONFIG env var not set" }], isError: true };
+
+    // Check if worker is running
+    const isRunning = WORKERS_TMUX_SESSION ? tmuxWindowExists(name) : watchdogProcs.has(name);
+    if (isRunning)
+      return { content: [{ type: "text", text: `Error: worker "${name}" is currently running — stop it first` }], isError: true };
+
+    try {
+      let defs = JSON.parse(readFileSync(WORKERS_CONFIG, "utf8"));
+      const idx = defs.findIndex(w => w.name === name);
+
+      if (idx < 0)
+        return { content: [{ type: "text", text: `Error: worker "${name}" not found in WORKERS_CONFIG` }], isError: true };
+
+      defs.splice(idx, 1);
+      writeFileSync(WORKERS_CONFIG, JSON.stringify(defs, null, 2) + "\n", "utf8");
+      console.log(`[claude-broker] deregistered worker "${name}" from WORKERS_CONFIG`);
+      return { content: [{ type: "text", text: `Deregistered worker "${name}" from WORKERS_CONFIG.` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
     }
   });
 
