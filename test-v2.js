@@ -742,6 +742,75 @@ async function run() {
   assert(sfcResult.summary.includes("conflict"),                  "sprint_file_conflicts: summary mentions conflict");
   assert(toolNames.includes("sprint_file_conflicts"),             "sprint_file_conflicts: registered in tool list");
 
+  // ── 20. register_worker / deregister_worker ──────────────────────────────
+  console.log("\n20. Worker registration (register_worker / deregister_worker)");
+
+  const testWorkerName = "test-hotplug-worker";
+
+  // 20a. register_worker happy path
+  const regRes = await call(a, "register_worker", {
+    name: testWorkerName,
+    ns: "test",
+    worker_dir: "workers/test",
+    repo_root: "/tmp/test-repo",
+    inbox_channel: "test-hotplug",
+  });
+  assert(!regRes.includes("isError") && !regRes.includes("error"), `register_worker: success (got: ${regRes.slice(0, 60)})`);
+  assert(regRes.includes(testWorkerName) || regRes.includes("registered"), "register_worker: response confirms registration");
+  assert(toolNames.includes("register_worker"), "register_worker: registered in tool list");
+
+  // 20b. list_workers shows newly registered worker
+  const listAfterReg = await call(a, "list_workers", {});
+  assert(listAfterReg.includes(testWorkerName), "list_workers: newly registered worker appears in list");
+
+  // 20c. deregister_worker happy path
+  const deregRes = await call(a, "deregister_worker", { name: testWorkerName });
+  assert(!deregRes.includes("isError") && !deregRes.includes("error"), `deregister_worker: success (got: ${deregRes.slice(0, 60)})`);
+  assert(deregRes.includes(testWorkerName) || deregRes.includes("deregistered"), "deregister_worker: response confirms deregistration");
+  assert(toolNames.includes("deregister_worker"), "deregister_worker: registered in tool list");
+
+  // 20d. list_workers confirms worker gone after deregister
+  const listAfterDereg = await call(a, "list_workers", {});
+  assert(!listAfterDereg.includes(testWorkerName), "list_workers: deregistered worker no longer appears in list");
+
+  // 20e. deregister_worker on nonexistent name returns error
+  const deregNonexistent = await a.callTool({ name: "deregister_worker", arguments: { name: "nonexistent-worker-xyz" } });
+  assert(deregNonexistent.isError === true || deregNonexistent.content[0].text.includes("not found") || deregNonexistent.content[0].text.includes("error"),
+    "deregister_worker: nonexistent worker returns error");
+
+  // 20f. register_worker with missing required field returns error
+  const regMissing = await a.callTool({ name: "register_worker", arguments: { name: testWorkerName } });
+  assert(regMissing.isError === true || regMissing.content[0].text.includes("required") || regMissing.content[0].text.includes("error"),
+    "register_worker: missing required field returns error");
+
+  // 20g. register_worker with same name is upsert (succeeds, not error)
+  const regUpsert1 = await call(a, "register_worker", {
+    name: testWorkerName,
+    ns: "test",
+    worker_dir: "workers/test",
+    repo_root: "/tmp/test-repo",
+    inbox_channel: "test-hotplug",
+  });
+  assert(!regUpsert1.includes("isError") && !regUpsert1.includes("error"),
+    "register_worker: duplicate registration (upsert) succeeds, not error");
+  const regUpsert2 = await call(a, "register_worker", {
+    name: testWorkerName,
+    ns: "test",
+    worker_dir: "workers/test-updated",
+    repo_root: "/tmp/test-repo2",
+    inbox_channel: "test-hotplug-updated",
+  });
+  assert(!regUpsert2.includes("isError") && !regUpsert2.includes("error"),
+    "register_worker: second upsert with different config succeeds");
+
+  // 20h. Cleanup: deregister test worker if still registered (defensive afterAll)
+  try {
+    const finalDereg = await call(a, "deregister_worker", { name: testWorkerName });
+    ok("register_worker/deregister_worker: cleanup deregistration succeeded");
+  } catch (e) {
+    // Already deregistered or error is OK here (cleanup phase)
+  }
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
   for (const c of [ch, wch, wch2, wch3, wch4, dch, pch, gch, wsch, toch, igch, iwsch, crch, crch2, hmch, rlch, msch, ssch, ssch2, hbch, bch1, bch2, crbch, gpsInbox, tsInbox, tsCtrl, tsCtrl2, ssStatus, sfcStatus]) {
     await call(a, "purge_channel", { channel: c }).catch(() => {});
