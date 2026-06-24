@@ -353,7 +353,9 @@ Rules:
 ### Sprint close
 
 1. Confirm all in-flight task_ids have `type: result` on `{{PREFIX}}-status`
-2. **Dispatch review task** to `{{PREFIX}}-reviewer`:
+2. **Dispatch review task** to `{{PREFIX}}-reviewer`.
+
+   **Monorepo** (`REPO_MODE=monorepo`):
    ```json
    {
      "type": "task",
@@ -368,17 +370,80 @@ Rules:
      }
    }
    ```
+
+   **Multi-repo** (`REPO_MODE=multi-repo`): add a `repos` array so the reviewer diffs every repo:
+   ```json
+   {
+     "type": "task",
+     "task_id": "{{PREFIX}}-<YYYY-MM-DD>-review-sprint-close",
+     "from": "orchestrator",
+     "to": "reviewer",
+     "subject": "Sprint close review",
+     "body": {
+       "repos": [
+         { "path": "<ORCH_REPO>", "base": "main", "head": "HEAD" },
+         { "path": "<WORKER_REPOS[worker1]>", "base": "main", "head": "worker/<worker1>" },
+         { "path": "<WORKER_REPOS[worker2]>", "base": "main", "head": "worker/<worker2>" }
+       ],
+       "checklist": ["Secrets", "File ownership", "Test coverage", "No force-push markers", "No TODO/FIXME blocking"]
+     }
+   }
+   ```
+
    Wait for result: `wait_for_messages(channel="{{PREFIX}}-status", filter_sender="reviewer", filter_type="result", timeout_ms=300000)`
 3. If reviewer verdict is `"block"`: **do not merge** — investigate and fix blocking issues first
-4. If verdict is `"approve"` or `"advise"`: proceed
-5. Confirm all workers' commits are on the correct branch
-6. `AskUserQuestion` to approve merge
-7. `AskUserQuestion` to approve channel purge — show: channel names, message counts,
+4. If verdict is `"approve"` or `"advise"`: confirm all workers' commits are on the correct branch.
+
+   **Monorepo**: for each worker, run:
+   ```bash
+   git log --oneline worker/<name> ^main | head -5   # should list sprint commits
+   ```
+   If the log is empty, the worker has not committed — check `{{PREFIX}}-status` for their result's `body.commits` before proceeding.
+
+   **Multi-repo**: repeat the above in each worker's repo:
+   ```bash
+   git -C <WORKER_REPOS[worker1]> log --oneline worker/<worker1> ^main | head -5
+   git -C <WORKER_REPOS[worker2]> log --oneline worker/<worker2> ^main | head -5
+   ```
+
+5. Trial merge to surface conflicts before user approval.
+
+   **Monorepo**: trial-merge all worker branches into main (do NOT commit):
+   ```bash
+   git checkout main
+   # Repeat for each worker branch; abort after each trial:
+   git merge --no-commit --no-ff worker/<worker1> && git merge --abort
+   git merge --no-commit --no-ff worker/<worker2> && git merge --abort
+   ```
+   If any trial reports conflicts: run `sprint_file_conflicts(status_channel="{{PREFIX}}-status")`,
+   identify the overlapping files, resolve (re-sequence or apply `--ours`/`--theirs` with justification
+   posted to `{{PREFIX}}-status`), then retry.
+
+   **Multi-repo**: run the trial merge in each worker's own repo — there is no cross-repo merge step.
+   Each repo merges independently to its own `main`.
+
+   `AskUserQuestion` to approve merge (show: trial merge result, commit list per branch, any conflicts).
+
+   After approval, execute the merge. **Monorepo** — merge in dependency order (lower-risk first):
+   ```bash
+   git merge --no-ff worker/<worker1> -m "sprint-close: merge worker/<worker1>"
+   git merge --no-ff worker/<worker2> -m "sprint-close: merge worker/<worker2>"
+   git log --oneline -8   # confirm all branches are now in main
+   ```
+   **Multi-repo** — merge in each worker's repo separately:
+   ```bash
+   git -C <WORKER_REPOS[worker1]> checkout main
+   git -C <WORKER_REPOS[worker1]> merge --no-ff worker/<worker1> -m "sprint-close: merge worker/<worker1>"
+   git -C <WORKER_REPOS[worker2]> checkout main
+   git -C <WORKER_REPOS[worker2]> merge --no-ff worker/<worker2> -m "sprint-close: merge worker/<worker2>"
+   ```
+
+6. `AskUserQuestion` to approve channel purge — show: channel names, message counts,
    open tasks being deferred, cost snapshot from
    `get_latest_heartbeats(channel="{{PREFIX}}-telemetry")`
-8. Write sprint retrospective — `send_message(channel="{{PREFIX}}-sprint-retrospective", ...)` with sprint summary, tasks completed, and any open items being deferred
-9. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
-10. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog` and `{{PREFIX}}-sprint-retrospective`
+7. Write sprint retrospective — `send_message(channel="{{PREFIX}}-sprint-retrospective", ...)` with sprint summary, tasks completed, and any open items being deferred
+8. Dispatch deferred items to `{{PREFIX}}-backlog` before purging
+9. Purge all `{{PREFIX}}-*` channels **except** `{{PREFIX}}-backlog` and `{{PREFIX}}-sprint-retrospective`
 
 ### Schema migration sequencing
 
@@ -499,7 +564,8 @@ Replace placeholders before writing:
 - `{{WORKER}}` → worker name (e.g. `api`)
 - `{{WORKER_TITLE}}` → capitalized (e.g. `Api`)
 - `{{WORKER_UPPER}}` → ALL-CAPS (e.g. `API`)
-- `{{PROJECT_NAME}}`, `{{PREFIX}}`, `{{BROKER_URL}}`, `{{TARGET_ROOT}}` → actual values
+- `{{PROJECT_NAME}}`, `{{PREFIX}}`, `{{BROKER_URL}}` → actual values
+- `{{TARGET_ROOT}}` → **per-worker**: use `WORKER_REPOS[worker]` in multi-repo mode; use the single `TARGET_ROOT` in monorepo mode. Every `git -C {{TARGET_ROOT}}` in a worker's CLAUDE.md must point to that worker's own repo root — do NOT use the orchestrator repo root here.
 - `{{OWNED_FILES_SUMMARY}}` → one sentence (e.g. "all API routes, middleware, and server config")
 - `{{NEVER_TOUCH_SUMMARY}}` → one sentence (e.g. "frontend files and database migrations")
 - `{{OWNERSHIP_TABLE_ROWS}}` → Markdown table rows: `| \`path/\` | purpose |`
@@ -663,7 +729,7 @@ For production-touching tasks, `body` must include `consent_basis`.
       "test": "PASS (N/N)",
       "committed": "PASS"
     },
-    "commits": [{ "sha": "abc1234", "branch": "main", "message": "[{{PREFIX}}-...] ..." }],
+    "commits": [{ "sha": "abc1234", "branch": "worker/{{WORKER}}", "message": "[{{PREFIX}}-...] ..." }],
     "consent_basis": "orchestrator-dispatch-only"
   }
 }
@@ -765,19 +831,30 @@ When you receive a review task, the `body` contains:
 
 ### Steps
 
+**If `body.repos` is absent** (monorepo or single-repo review):
+
 1. Get the diff:
    ```bash
    git -C {{TARGET_ROOT}} diff <base>..<head> --name-only
    git -C {{TARGET_ROOT}} diff <base>..<head> -- <scope files if given>
    ```
-
 2. For each changed file in scope:
    - Read the file: `Read(file_path=<path>)`
    - Note any issues (see checklist categories below)
-
 3. Check each item in `body.checklist` explicitly.
-
 4. Post result (see Result envelope below).
+
+**If `body.repos` is present** (multi-repo review — array of `{path, base, head, scope?}`):
+
+1. For each entry in `body.repos`:
+   ```bash
+   git -C <entry.path> diff <entry.base>..<entry.head> --name-only
+   git -C <entry.path> diff <entry.base>..<entry.head> -- <entry.scope files if given>
+   ```
+2. Collect all changed files across all repos; prefix each with its repo path so findings are unambiguous.
+3. Check each item in `body.checklist` across all repos.
+4. Post a single result envelope; `files_reviewed` should include repo-prefixed paths (e.g. `workerA-repo/src/api.ts`).
+   If any repo produced no diff (empty output from step 1), note it explicitly in findings as `"advisory": "no changes in <path>"` rather than treating it as a pass.
 
 ### Default checklist (always apply, in addition to task-specific items)
 

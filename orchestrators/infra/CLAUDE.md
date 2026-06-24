@@ -168,8 +168,35 @@ Use this envelope shape (JSON string in `content`):
    ```
    Wait for result: `wait_for_messages(channel="cb-status", filter_sender="reviewer", filter_type="result", timeout_ms=300000)`
 3. If reviewer verdict is `"block"`: **do not merge** — investigate and fix blocking issues first
-4. If verdict is `"approve"` or `"advise"`: confirm both workers' commits are on the right branch
-5. `AskUserQuestion` to approve merge to main
+4. If verdict is `"approve"` or `"advise"`: confirm both workers' commits are on the right branch:
+   ```bash
+   git log --oneline worker/core ^main | head -5        # should list sprint commits
+   git log --oneline worker/protocol-qa ^main | head -5
+   git branch --show-current   # you are on main; workers are on their own branches
+   ```
+   If either log is empty, the worker may not have committed — check `cb-status` for their result's `body.commits`.
+
+5. Trial merge to surface conflicts before user approval:
+   ```bash
+   # Merge core first (server changes), then protocol-qa (schema/test changes)
+   git checkout main
+   git merge --no-commit --no-ff worker/core
+   git merge --abort
+   git merge --no-commit --no-ff worker/protocol-qa
+   git merge --abort
+   ```
+   If either trial reports conflicts: run `sprint_file_conflicts(status_channel="cb-status")`, identify the
+   overlapping files, and resolve before proceeding (either re-sequence with `depends_on` or apply
+   `--ours`/`--theirs` with explicit justification posted to `cb-status`).
+
+   `AskUserQuestion` to approve merge to main (show: trial merge result, commit list per branch, any conflicts found).
+
+   After approval, execute the merge in order — core before protocol-qa (protocol-qa tests verify the server):
+   ```bash
+   git merge --no-ff worker/core -m "sprint-close: merge worker/core"
+   git merge --no-ff worker/protocol-qa -m "sprint-close: merge worker/protocol-qa"
+   git log --oneline -6   # confirm both branches are in main
+   ```
 6. `AskUserQuestion` to approve purge (show: channel names, message counts,
    open tasks being deferred, cost snapshot from `get_latest_per_sender("cb-telemetry")`)
 7. Dispatch deferred items to `cb-backlog` before purging

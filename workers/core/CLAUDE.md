@@ -37,6 +37,15 @@ An orchestrator session (infra-orchestrator) dispatches work to you via the
 
 At the start of every user turn, before doing anything else:
 
+0. **Branch safety — first action every session:**
+   ```bash
+   git fetch origin
+   git checkout -B worker/core origin/worker/core 2>/dev/null || \
+     git checkout -B worker/core origin/main
+   git branch --show-current   # must print "worker/core"
+   ```
+   If the output is NOT `worker/core`: post `type: question` to `cb-status` and **STOP** — do not read inbox or start any task.
+
 1. `read_messages(channel="cb-core", since_id=<last>)` — your inbox.
    Default `since_id=0` on first read of a new session; remember the highest
    id seen and never re-read old messages.
@@ -154,7 +163,7 @@ For production-touching tasks, `body` must include `consent_basis`:
   "summary": "PASS — implemented X, all tests passing",
   "body": {
     "required_checks": { "test": "PASS (42/42)", "committed": "PASS" },
-    "commits": [{ "sha": "abc1234", "branch": "main", "message": "[cb-...] ..." }],
+    "commits": [{ "sha": "abc1234", "branch": "worker/core", "message": "[cb-...] ..." }],
     "output_ref": "/tmp/cb-2026-06-10-foo-test.txt"
   }
 }
