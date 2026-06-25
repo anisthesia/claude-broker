@@ -218,6 +218,9 @@ const stmtDashCostRows = db.prepare(
 const stmtDashRlRows = db.prepare(
   `SELECT sender, content FROM messages WHERE channel = 'dv-rate-limits' AND created_at >= ? ORDER BY id ASC`
 );
+const stmtDashChanRows = db.prepare(
+  `SELECT sender, content FROM messages WHERE channel = ? AND created_at >= ? ORDER BY id ASC`
+);
 
 // Per-worker task timing: join dispatch (worker inbox) with result (status channel) on task_id
 const stmtWorkerTiming = db.prepare(`
@@ -1491,7 +1494,7 @@ app.get("/dashboard", (req, res) => {
     try { return JSON.parse(r.channels).some(c => nsOf(c) === selectedNs); } catch { return false; }
   });
   const schemas   = allSchemas.filter(r => matchesNs(r.channel));
-  const schemaSet = new Set(schemas.map(s => s.channel));
+  const schemaMap = new Map(schemas.map(s => [s.channel, s]));
 
   // ── Sprint info ───────────────────────────────────────────────────────────────
   // Collect sprint info per namespace (or just for the selected one)
@@ -1514,7 +1517,9 @@ app.get("/dashboard", (req, res) => {
 
   // ── Today's cost summary from telemetry (session-end heartbeats) ─────────────
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-  const costRows = stmtDashCostRows.all(todayStart.getTime());
+  const costRows = isAll
+    ? stmtDashCostRows.all(todayStart.getTime())
+    : stmtDashChanRows.all(`${selectedNs}-telemetry`, todayStart.getTime());
   const costByWorker = {};
   for (const r of costRows) {
     let hb = {}; try { hb = JSON.parse(r.content); } catch { continue; }
@@ -1526,7 +1531,10 @@ app.get("/dashboard", (req, res) => {
   const totalCostToday = Math.round(Object.values(costByWorker).reduce((s, v) => s + v, 0) * 10000) / 10000;
 
   // ── Rate limit hits today ─────────────────────────────────────────────────────
-  const rlRows = stmtDashRlRows.all(todayStart.getTime());
+  const rlChan = isAll ? "dv-rate-limits" : `${selectedNs}-rate-limits`;
+  const rlRows = isAll
+    ? stmtDashRlRows.all(todayStart.getTime())
+    : stmtDashChanRows.all(rlChan, todayStart.getTime());
   const rlByWorker = {};
   for (const r of rlRows) {
     let rec = {}; try { rec = JSON.parse(r.content); } catch { continue; }
@@ -1556,15 +1564,21 @@ app.get("/dashboard", (req, res) => {
     try { hb = JSON.parse(row.content); } catch {}
     const ageSec     = Math.floor((now - row.created_at) / 1000);
     const state      = hb.activity?.state || hb.state || "unknown";
-    const task       = hb.activity?.current_task || null;
+    const task       = hb.activity?.current_task_id || null;
     const cost       = hb.cost_since_start?.estimated_usd ?? null;
     const rotating   = hb.context?.rotation_recommended === true;
+    const tierPct    = hb.context?.tier_threshold_pct ?? null;
+    const model      = hb.model || null;
     const inboxChan  = `${row._ns}-${row.sender}`;
     const inboxCount = channelCountMap.get(inboxChan) || 0;
 
     // on-demand model: offline between tasks is normal — use WORKER_OFFLINE_THRESHOLD_S (default 300s)
     let status;
-    if (state === "working" && ageSec <= 600) {
+    if (state === "blocked-on-question") {
+      status = "blocked";
+    } else if (state === "rotating") {
+      status = "rotating";
+    } else if (state === "working" && ageSec <= 600) {
       status = "running";
     } else if (state === "working" && ageSec > 600) {
       status = "crashed";
@@ -1574,7 +1588,7 @@ app.get("/dashboard", (req, res) => {
       status = inboxCount > 0 ? "queued" : "offline";
     }
 
-    return { sender: row.sender, _ns: row._ns, state, task, cost, ageSec, status, rotating, inboxCount };
+    return { sender: row.sender, _ns: row._ns, state, task, cost, ageSec, status, rotating, tierPct, model, inboxCount };
   });
 
   // Also surface workers with pending inbox but no telemetry (never ran or pre-first-heartbeat crash)
@@ -1726,8 +1740,13 @@ app.get("/dashboard", (req, res) => {
 
   // ── Channel rows (with preview) ───────────────────────────────────────────────
   const chanRows = channels.map(r => {
-    const exempt  = PRUNE_EXEMPT.includes(r.channel) ? '<span class="badge badge-yellow">exempt</span>' : '';
-    const schema  = schemaSet.has(r.channel) ? '<span class="badge badge-blue">schema</span>' : '';
+    const exempt      = PRUNE_EXEMPT.includes(r.channel) ? '<span class="badge badge-yellow">exempt</span>' : '';
+    const schemaInfo  = schemaMap.get(r.channel);
+    const schema      = schemaInfo
+      ? (schemaInfo.strict
+          ? '<span class="badge badge-blue">strict</span>'
+          : '<span class="badge badge-orange">warn</span>')
+      : '';
     const prev    = previewMap.get(r.channel);
     let preview   = "";
     if (prev) {
@@ -1735,8 +1754,9 @@ app.get("/dashboard", (req, res) => {
       try { const p = JSON.parse(text); text = p.subject || p.type || text; } catch {}
       preview = `<span class="preview">${escHtml(String(text).slice(0,80))}${text.length > 80 ? "…" : ""}</span>`;
     }
+    const chanHref = `/dashboard/channel?name=${encodeURIComponent(r.channel)}${selectedNs !== "all" ? `&ns=${selectedNs}` : ""}`;
     return `<tr>
-      <td>${escHtml(r.channel)}${exempt}${schema}</td>
+      <td><a href="${chanHref}" class="chan-link">${escHtml(r.channel)}</a>${exempt}${schema}</td>
       <td>${r.n}</td>
       <td>#${r.last_id}</td>
       <td>${agoStr(r.last_ts)}</td>
@@ -1747,15 +1767,25 @@ app.get("/dashboard", (req, res) => {
   // ── Worker liveness rows ──────────────────────────────────────────────────────
   const workerRows = workers.map(w => {
     let dotClass;
-    if      (w.status === "running" || w.status === "idle") dotClass = "dot-green";
-    else if (w.status === "queued")                         dotClass = "dot-yellow";
-    else if (w.status === "offline")                        dotClass = "dot-grey";
-    else                                                    dotClass = "dot-red";
+    if      (w.status === "running" || w.status === "idle")    dotClass = "dot-green";
+    else if (w.status === "queued" || w.status === "rotating") dotClass = "dot-yellow";
+    else if (w.status === "offline")                           dotClass = "dot-grey";
+    else                                                       dotClass = "dot-red";
 
-    const stateLabel = w.ageSec === null  ? '<span class="dim">—</span>'
-                     : w.status === "offline" ? "offline"
-                     : w.state === "idle-polling" ? "idle"
-                     : w.state;
+    const tierLabel = (w.tierPct !== null && w.status === "running")
+      ? ` <span class="ctx-fill${w.tierPct >= 80 ? " ctx-fill-warn" : ""}" title="context fill">${Math.round(w.tierPct)}%</span>`
+      : "";
+    const stateLabel = w.ageSec === null
+      ? '<span class="dim">—</span>'
+      : w.status === "offline" || w.status === "crashed"
+        ? w.status
+        : (w.state === "idle-polling" || w.state === "idle-exit" || w.state === "session-end")
+          ? "idle"
+          : w.state === "blocked-on-question"
+            ? '<span style="color:#f85149;font-weight:bold">blocked</span>'
+            : w.status === "running"
+              ? `working${tierLabel}`
+              : w.state;
     const taskCell   = w.task ? `<span class="task-label">${escHtml(String(w.task).slice(0,40))}</span>` : '<span class="dim">—</span>';
     const costCell   = w.cost != null ? `$${Number(w.cost).toFixed(3)}` : '<span class="dim">—</span>';
     const rotBadge   = w.rotating ? '<span class="badge badge-orange">rotate</span>' : '';
@@ -1778,8 +1808,12 @@ app.get("/dashboard", (req, res) => {
       idleCell = `<span class="idle-time">${agoStr(t.last_result_at)}</span>`;
     }
 
+    const modelTag = w.model
+      ? `<span class="worker-model" title="${escHtml(w.model)}">${escHtml(w.model.replace(/^claude-/,"").replace(/-\d{8}$/,"").slice(0,14))}</span>`
+      : "";
+
     return `<tr>
-      <td><span class="dot ${dotClass}"></span> ${escHtml(w.sender)}${rotBadge}</td>
+      <td><span class="dot ${dotClass}"></span> ${escHtml(w.sender)}${rotBadge}${modelTag}</td>
       <td>${stateLabel}</td>
       <td>${taskCell}</td>
       <td>${costCell}</td>
@@ -1799,7 +1833,7 @@ app.get("/dashboard", (req, res) => {
   }).join("\n");
 
   const schemaRows = schemas.map(r =>
-    `<tr><td>${escHtml(r.channel)}</td><td>${r.strict ? "yes" : "no (warn)"}</td><td>${new Date(r.updated_at).toISOString()}</td></tr>`
+    `<tr><td>${escHtml(r.channel)}</td><td>${r.strict ? '<span class="badge badge-blue">strict</span>' : '<span class="badge badge-orange">warn</span>'}</td><td>${r.version ? escHtml(r.version) : '<span class="dim">—</span>'}</td><td>${new Date(r.updated_at).toISOString()}</td></tr>`
   ).join("\n");
 
   const totalMsgs = channels.reduce((a, r) => a + r.n, 0);
@@ -1905,6 +1939,11 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
   .feed-to{color:#e3b341}
   .timing-avg{color:#79c0ff;cursor:default}
   .idle-time{color:#8b949e}
+  .ctx-fill{color:#79c0ff;font-size:10px;margin-left:4px}
+  .ctx-fill-warn{color:#f0883e}
+  .worker-model{color:#484f58;font-size:10px;margin-left:6px;vertical-align:middle}
+  .chan-link{color:#c9d1d9;text-decoration:none}
+  .chan-link:hover{color:#58a6ff;text-decoration:underline}
 </style>
 </head>
 <body>
@@ -1916,6 +1955,7 @@ ${live ? `<meta http-equiv="refresh" content="30">` : ""}
   <div class="config-item"><span class="config-label">Exempt</span><span class="config-value">${PRUNE_EXEMPT.join(", ") || "(none)"}</span></div>
   <div class="config-item"><span class="config-label">Channels${isAll ? "" : ` (${selectedNs})`}</span><span class="config-value">${channels.length} / ${allChannels.length}</span></div>
   <div class="config-item"><span class="config-label">Messages${isAll ? "" : ` (${selectedNs})`}</span><span class="config-value">${totalMsgs}</span></div>
+  <div class="config-item"><span class="config-label">Schemas${isAll ? "" : ` (${selectedNs})`}</span><span class="config-value">${schemas.length} / ${allSchemas.length}</span></div>
   <div class="config-item"><span class="config-label">Projects</span><span class="config-value">${namespaces.join(", ") || "(none yet)"}</span></div>
 </div>
 
@@ -1985,7 +2025,7 @@ ${caps.length === 0
 <h2>Channel Schemas ${nsLabel}</h2>
 ${schemas.length === 0
   ? `<div class="empty">No schemas${isAll ? " registered." : ` for "${selectedNs}".`}</div>`
-  : `<table><thead><tr><th>Channel</th><th>Strict</th><th>Updated</th></tr></thead><tbody>${schemaRows}</tbody></table>`}
+  : `<table><thead><tr><th>Channel</th><th>Mode</th><th>Version</th><th>Updated</th></tr></thead><tbody>${schemaRows}</tbody></table>`}
 
 <p style="margin-top:24px;color:#484f58;font-size:11px">Refreshed at ${new Date().toISOString()} &nbsp;·&nbsp; <a href="${tabHref(selectedNs, live)}" style="color:#58a6ff">reload</a></p>
 <script>
@@ -1999,6 +2039,114 @@ function workerAction(name, action) {
     .catch(() => { alert('Request failed'); btn.disabled = false; });
 }
 </script>
+</body></html>`);
+});
+
+// Channel message viewer
+app.get("/dashboard/channel", (req, res) => {
+  const channel = req.query.name;
+  const backNs  = req.query.ns || "all";
+  const limit   = Math.min(parseInt(req.query.limit || "50", 10), 200);
+  const since   = req.query.since_id ? parseInt(req.query.since_id, 10) : 0;
+
+  if (!channel) return res.status(400).send("channel required");
+
+  const backHref = backNs === "all" ? "/dashboard" : `/dashboard?ns=${backNs}`;
+
+  const rows = db.prepare(
+    `SELECT id, sender, content, created_at FROM messages WHERE channel = ? AND id > ? ORDER BY id DESC LIMIT ?`
+  ).all(channel, since, limit);
+
+  const schemaRow = db.prepare("SELECT strict, version FROM channel_schemas WHERE channel = ?").get(channel);
+  const totalRow  = db.prepare("SELECT COUNT(*) AS n FROM messages WHERE channel = ?").get(channel);
+
+  const msgRows = rows.map(r => {
+    let parsed = null;
+    let contentHtml = "";
+    try {
+      parsed = JSON.parse(r.content);
+      contentHtml = `<pre class="msg-json">${escHtml(JSON.stringify(parsed, null, 2))}</pre>`;
+    } catch {
+      contentHtml = `<pre class="msg-raw">${escHtml(r.content)}</pre>`;
+    }
+    const type = parsed?.type || null;
+    let badgeClass = "feed-other";
+    if      (type === "result")   badgeClass = "feed-result";
+    else if (type === "question") badgeClass = "feed-question";
+    else if (type === "error")    badgeClass = "feed-error";
+    else if (type === "task")     badgeClass = "feed-task";
+    else if (type === "heartbeat") badgeClass = "feed-other";
+    const taskId = parsed?.task_id ? `<span class="msg-taskid">${escHtml(parsed.task_id)}</span>` : "";
+    const typeBadge = type ? `<span class="feed-badge ${badgeClass}">${escHtml(type)}</span>` : "";
+    return `<div class="msg-card${type === "question" ? " msg-card-q" : ""}">
+  <div class="msg-card-hdr">
+    <span class="msg-id">#${r.id}</span>
+    ${typeBadge}
+    <span class="msg-sender">${escHtml(r.sender)}</span>
+    ${taskId}
+    <span class="msg-time">${new Date(r.created_at).toISOString().replace("T"," ").slice(0,19)}</span>
+  </div>
+  ${contentHtml}
+</div>`;
+  }).join("\n");
+
+  const schemaBadge = schemaRow
+    ? (schemaRow.strict
+        ? `<span class="badge badge-blue">strict</span>${schemaRow.version ? ` <span class="badge" style="background:#21262d;color:#8b949e">v${escHtml(schemaRow.version)}</span>` : ""}`
+        : `<span class="badge badge-orange">warn</span>${schemaRow.version ? ` <span class="badge" style="background:#21262d;color:#8b949e">v${escHtml(schemaRow.version)}</span>` : ""}`)
+    : '<span style="color:#484f58">no schema</span>';
+
+  const olderHref = rows.length === limit
+    ? `/dashboard/channel?name=${encodeURIComponent(channel)}&ns=${backNs}&limit=${limit}&since_id=${rows[rows.length-1].id - 1}`
+    : null;
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escHtml(channel)} — claude-broker</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:ui-monospace,monospace;background:#0d1117;color:#c9d1d9;padding:24px;font-size:13px}
+  .back{color:#58a6ff;text-decoration:none;font-size:12px}
+  .back:hover{text-decoration:underline}
+  h1{color:#c9d1d9;font-size:16px;margin:8px 0 4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .chan-meta{color:#8b949e;font-size:12px;margin-bottom:20px}
+  .msg-card{background:#161b22;border:1px solid #21262d;border-radius:6px;margin-bottom:10px;overflow:hidden}
+  .msg-card-q{border-color:#6e4c00}
+  .msg-card-hdr{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid #21262d;flex-wrap:wrap}
+  .msg-id{color:#484f58;font-size:11px;min-width:50px}
+  .msg-sender{color:#79c0ff;font-weight:bold}
+  .msg-taskid{color:#484f58;font-size:11px;font-style:italic}
+  .msg-time{color:#484f58;font-size:11px;margin-left:auto}
+  .msg-json{padding:12px 14px;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:#c9d1d9;max-height:600px;overflow-y:auto}
+  .msg-raw{padding:12px 14px;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:#8b949e}
+  .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;vertical-align:middle}
+  .badge-yellow{background:#6e4c00;color:#e3b341}
+  .badge-blue{background:#0d419d;color:#79c0ff}
+  .badge-orange{background:#5a3500;color:#f0883e}
+  .feed-badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:.04em}
+  .feed-result{background:#0d2b0d;color:#3fb950}
+  .feed-question{background:#3b2800;color:#e3b341}
+  .feed-error{background:#2b0d0d;color:#f85149}
+  .feed-task{background:#0d1b3e;color:#79c0ff}
+  .feed-other{background:#21262d;color:#8b949e}
+  .empty{color:#484f58;font-style:italic;padding:20px 0}
+  .pager{margin-top:16px;display:flex;gap:12px;align-items:center}
+  .pager a{color:#58a6ff;font-size:12px;text-decoration:none}
+  .pager a:hover{text-decoration:underline}
+  .pager-info{color:#484f58;font-size:11px}
+</style>
+</head>
+<body>
+<a href="${backHref}" class="back">← back to dashboard</a>
+<h1>${escHtml(channel)} ${schemaBadge}</h1>
+<div class="chan-meta">${totalRow.n} total messages &nbsp;·&nbsp; showing last ${Math.min(rows.length, limit)}</div>
+${rows.length === 0
+  ? `<div class="empty">No messages on this channel yet.</div>`
+  : msgRows}
+${olderHref ? `<div class="pager"><a href="${escHtml(olderHref)}">← older messages</a><span class="pager-info">showing ${limit} of ${totalRow.n}</span></div>` : ""}
 </body></html>`);
 });
 
