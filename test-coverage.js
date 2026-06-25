@@ -40,6 +40,17 @@
  * 36. purge_channels_by_prefix: no-match prefix succeeds with 0 channels purged
  * 37. send_message: channel name with leading whitespace rejected
  * 38. wait_for_messages filter_type: skips non-matching messages already in channel
+ * 39. read_messages: since_id at max_id returns no messages
+ * 40. read_messages: filter_sender + filter_type + limit all three combined
+ * 41. sprint_file_conflicts: lowercase "skip" NOT excluded (startsWith("SKIP") is case-sensitive)
+ * 42. send_message_batch: single message (min=1 boundary)
+ * 43. clear_channel_schema: strict schema cleared → previously-invalid message now accepted
+ * 44. purge_channel: non-existent channel → 0 messages deleted (graceful)
+ * 45. sprint_summary: namespace derived from channel with multiple dashes (lastIndexOf)
+ * 46. check_results_batch: duplicate task_ids in array handled correctly (Set dedup)
+ * 47. get_channel_schema: no version field → no "Version:" line in output
+ * 48. has_messages: channel that never existed → pending=false (graceful)
+ * 49. send_message_batch: warn-only schema invalid message — batch succeeds (no isError)
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -1420,6 +1431,291 @@ async function run() {
     assert(r.includes('"v":2'),     "wfm filter_type: correct message body present");
 
     await call(a, "purge_channel", { channel: wftCh });
+  }
+
+  // ── 39. read_messages: since_id at max_id returns no messages ────────────────
+
+  console.log("\n39. read_messages: since_id at max_id returns no new messages");
+  {
+    const rmCh = ch("rm-since-max");
+
+    await call(a, "send_message", { channel: rmCh, sender: "x", content: "msg-1" });
+    await call(a, "send_message", { channel: rmCh, sender: "x", content: "msg-2" });
+
+    const hm = JSON.parse(await call(a, "has_messages", { channel: rmCh, since_id: 0 }));
+    const maxId = hm.max_id;
+
+    // Reading with since_id = maxId should return no messages
+    const empty = await call(a, "read_messages", { channel: rmCh, since_id: maxId });
+    assert(
+      empty.includes("No new messages") || empty.trim() === "",
+      `read_messages since_id=max_id: returns empty (got: ${empty.slice(0, 80)})`,
+    );
+
+    // Sanity: reading with since_id = 0 still returns both messages
+    const all = await call(a, "read_messages", { channel: rmCh, since_id: 0 });
+    const lines = all.trim().split("\n").filter(l => l.match(/\[#\d+\]/));
+    assert(lines.length === 2, `read_messages since_id=0: still sees 2 messages (got ${lines.length})`);
+
+    await call(a, "purge_channel", { channel: rmCh });
+  }
+
+  // ── 40. read_messages: filter_sender + filter_type + limit all three ─────────
+
+  console.log("\n40. read_messages: filter_sender + filter_type + limit combined");
+  {
+    const triCh = ch("rm-triple-filter");
+
+    // alice sends 5 results, bob sends 3 results, carol sends 4 notes
+    for (let i = 0; i < 5; i++)
+      await call(a, "send_message", { channel: triCh, sender: "alice",
+        content: JSON.stringify({ type: "result", v: i }) });
+    for (let i = 0; i < 3; i++)
+      await call(b, "send_message", { channel: triCh, sender: "bob",
+        content: JSON.stringify({ type: "result", v: i }) });
+    for (let i = 0; i < 4; i++)
+      await call(a, "send_message", { channel: triCh, sender: "carol",
+        content: JSON.stringify({ type: "note", v: i }) });
+
+    // All three filters: sender=alice, type=result, limit=3
+    const r = await call(a, "read_messages", {
+      channel: triCh, since_id: 0,
+      filter_sender: "alice", filter_type: "result", limit: 3,
+    });
+    const matchLines = r.trim().split("\n").filter(l => l.match(/\[#\d+\]/));
+
+    assert(matchLines.length === 3,    `rm triple-filter: limit=3 respected (got ${matchLines.length})`);
+    assert(r.includes("alice"),        "rm triple-filter: alice messages returned");
+    assert(!r.includes('"bob"') && !r.includes("<bob>"), "rm triple-filter: bob excluded");
+    assert(!r.includes('"carol"') && !r.includes("<carol>"), "rm triple-filter: carol excluded");
+    assert(!r.includes('"type":"note"'), "rm triple-filter: note type excluded");
+
+    await call(a, "purge_channel", { channel: triCh });
+  }
+
+  // ── 41. sprint_file_conflicts: lowercase "skip" NOT excluded ─────────────────
+
+  console.log("\n41. sprint_file_conflicts: lowercase 'skip' is NOT treated as SKIP");
+  {
+    const sfcCh = ch("sfc-skip-case");
+
+    // One worker posts a result with summary="skip — done" (lowercase) and affected_files
+    await call(a, "send_message", { channel: sfcCh, sender: "worker-a",
+      content: JSON.stringify({
+        type: "result", task_id: "skip-lower-1", from: "worker-a",
+        summary: "skip — idempotent (lowercase)",
+        affected_files: ["src/shared.ts"],
+      }) });
+    // Another worker also touches the same file — real conflict
+    await call(a, "send_message", { channel: sfcCh, sender: "worker-b",
+      content: JSON.stringify({
+        type: "result", task_id: "skip-lower-2", from: "worker-b",
+        summary: "PASS — done",
+        affected_files: ["src/shared.ts"],
+      }) });
+
+    const raw = JSON.parse(await call(a, "sprint_file_conflicts", { status_channel: sfcCh }));
+    // lowercase "skip" does NOT skip the message → conflict detected
+    assert(raw.conflicts.length === 1, `sfc skip-case: conflict detected for lowercase skip (got ${raw.conflicts.length})`);
+    assert(raw.conflicts[0]?.file === "src/shared.ts", "sfc skip-case: shared.ts in conflicts");
+
+    // Cross-check: uppercase SKIP IS excluded
+    const sfcCh2 = ch("sfc-skip-upper");
+    await call(a, "send_message", { channel: sfcCh2, sender: "worker-a",
+      content: JSON.stringify({
+        type: "result", task_id: "skip-upper-1", from: "worker-a",
+        summary: "SKIP — idempotent",
+        affected_files: ["src/shared.ts"],
+      }) });
+    await call(a, "send_message", { channel: sfcCh2, sender: "worker-b",
+      content: JSON.stringify({
+        type: "result", task_id: "skip-upper-2", from: "worker-b",
+        summary: "PASS — done",
+        affected_files: ["src/shared.ts"],
+      }) });
+    const raw2 = JSON.parse(await call(a, "sprint_file_conflicts", { status_channel: sfcCh2 }));
+    assert(raw2.conflicts.length === 0, `sfc skip-upper: uppercase SKIP excluded → no conflict (got ${raw2.conflicts.length})`);
+
+    await call(a, "purge_channel", { channel: sfcCh  });
+    await call(a, "purge_channel", { channel: sfcCh2 });
+  }
+
+  // ── 42. send_message_batch: single element ────────────────────────────────────
+
+  console.log("\n42. send_message_batch: single element (min=1)");
+  {
+    const bCh = ch("batch-single");
+
+    const r = await callRaw(a, "send_message_batch", {
+      messages: [{ channel: bCh, sender: "orch",
+        content: JSON.stringify({ type: "task", task_id: `single-${RUN}` }) }],
+    });
+    assert(!r.isError,                    "send_message_batch single: no error");
+    assert(r.content[0].text.includes("Sent 1 messages"), `send_message_batch single: '1 messages' in response (got: ${r.content[0].text.slice(0, 60)})`);
+
+    await call(a, "purge_channel", { channel: bCh });
+  }
+
+  // ── 43. clear_channel_schema removes strict enforcement ──────────────────────
+
+  console.log("\n43. clear_channel_schema: strict enforcement removed after clear");
+  {
+    const scCh = ch("schema-clear-enforce");
+    const strictSchema = JSON.stringify({
+      type: "object",
+      required: ["type", "task_id"],
+      properties: {
+        type:    { type: "string" },
+        task_id: { type: "string" },
+      },
+      additionalProperties: false,
+    });
+    const invalidMsg = JSON.stringify({ foo: "bar" }); // missing type + task_id
+
+    // Register strict schema
+    await call(a, "register_channel_schema", { channel: scCh, schema: strictSchema, strict: true });
+
+    // Invalid message is rejected
+    const blocked = await callRaw(a, "send_message", { channel: scCh, sender: "x", content: invalidMsg });
+    assert(blocked.isError === true, "clear-enforce: invalid msg blocked by strict schema");
+
+    // Clear the schema
+    await call(a, "clear_channel_schema", { channel: scCh });
+
+    // Same message now accepted (no schema)
+    const allowed = await callRaw(a, "send_message", { channel: scCh, sender: "x", content: invalidMsg });
+    assert(!allowed.isError, "clear-enforce: invalid msg accepted after schema cleared");
+
+    await call(a, "purge_channel", { channel: scCh });
+  }
+
+  // ── 44. purge_channel: non-existent channel ───────────────────────────────────
+
+  console.log("\n44. purge_channel: non-existent channel graceful");
+  {
+    const ghostCh = ch("ghost-never-created");
+
+    const r = await callRaw(a, "purge_channel", { channel: ghostCh });
+    assert(!r.isError, "purge_channel non-existent: no error");
+    assert(r.content[0].text.includes("0"), `purge_channel non-existent: 0 in response (got: ${r.content[0].text})`);
+  }
+
+  // ── 45. sprint_summary: namespace with multiple dashes ────────────────────────
+
+  console.log("\n45. sprint_summary: namespace with multiple dashes");
+  {
+    const ns      = `cov-${RUN}-multi`;
+    const ssCh    = `${ns}-dash-status`;  // lastIndexOf('-') → ns = "cov-RUN-multi-dash"
+    const inboxCh = `${ns}-dash-worker`;  // inbox: matches "cov-RUN-multi-dash-%"
+
+    // Dispatch 2 tasks to the inbox channel
+    for (let i = 0; i < 2; i++) {
+      await call(a, "send_message", { channel: inboxCh, sender: "orch",
+        content: JSON.stringify({ type: "task", task_id: `multi-${i}-${RUN}` }) });
+    }
+    // Post 1 result to status
+    await call(a, "send_message", { channel: ssCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: `multi-0-${RUN}`, summary: "PASS — done" }) });
+
+    const raw = JSON.parse(await call(a, "sprint_summary", { status_channel: ssCh }));
+    assert(raw.dispatched === 2,   `sprint_summary multi-dash: dispatched=2 (got ${raw.dispatched})`);
+    assert(raw.completed === 1,    `sprint_summary multi-dash: completed=1 (got ${raw.completed})`);
+    assert(raw.pending   === 1,    `sprint_summary multi-dash: pending=1 (got ${raw.pending})`);
+
+    await call(a, "purge_channel", { channel: ssCh    });
+    await call(a, "purge_channel", { channel: inboxCh });
+  }
+
+  // ── 46. check_results_batch: duplicate task_ids handled ──────────────────────
+
+  console.log("\n46. check_results_batch: duplicate task_ids");
+  {
+    const dupCh  = ch("crb-dup");
+    const tid    = `dup-task-${RUN}`;
+
+    await call(a, "send_message", { channel: dupCh, sender: "worker",
+      content: JSON.stringify({ type: "result", task_id: tid, summary: "PASS — done" }) });
+
+    // task_ids with duplicates: [tid, tid, "missing"]
+    const raw = JSON.parse(await call(a, "check_results_batch", {
+      channel: dupCh, task_ids: [tid, tid, "nonexistent-dedup"],
+    }));
+    assert(raw.results[tid] === true,             `crb dup: existing task_id found=true (got ${raw.results[tid]})`);
+    assert(raw.results["nonexistent-dedup"] === false, "crb dup: missing task not found");
+    // Both duplicate entries must be true (Set dedup preserves correct result)
+    const keys = Object.keys(raw.results);
+    assert(keys.length === 2, `crb dup: result map has 2 unique keys (got ${keys.length})`);
+
+    await call(a, "purge_channel", { channel: dupCh });
+  }
+
+  // ── 47. get_channel_schema: no version → no "Version:" line ──────────────────
+
+  console.log("\n47. get_channel_schema: schema without version → no Version line");
+  {
+    const gsCh = ch("gs-no-version");
+    const schema = JSON.stringify({ type: "object", properties: { msg: { type: "string" } } });
+
+    // Register without version
+    await call(a, "register_channel_schema", { channel: gsCh, schema, strict: false });
+    const r = await call(a, "get_channel_schema", { channel: gsCh });
+
+    assert(r.includes(`Channel: ${gsCh}`), "gs no-version: channel name in output");
+    assert(!r.includes("Version:"), `gs no-version: no Version line when not set (got: ${r.slice(0, 120)})`);
+
+    // Register with version
+    await call(a, "register_channel_schema", { channel: gsCh, schema, strict: false, version: "1.2" });
+    const r2 = await call(a, "get_channel_schema", { channel: gsCh });
+    assert(r2.includes("Version: 1.2"), `gs with-version: Version line present (got: ${r2.slice(0, 120)})`);
+
+    await call(a, "clear_channel_schema", { channel: gsCh });
+  }
+
+  // ── 48. has_messages: channel that never existed ──────────────────────────────
+
+  console.log("\n48. has_messages: channel that never existed");
+  {
+    const ghostCh = ch("hm-never-existed");
+
+    const r = JSON.parse(await call(a, "has_messages", { channel: ghostCh, since_id: 0 }));
+    assert(r.pending === false, `has_messages ghost: pending=false (got ${r.pending})`);
+    assert(typeof r.max_id === "number", `has_messages ghost: max_id is a number (got ${typeof r.max_id})`);
+    assert(r.channel === ghostCh, "has_messages ghost: channel field matches");
+  }
+
+  // ── 49. send_message_batch: warn-only schema — batch succeeds ─────────────────
+
+  console.log("\n49. send_message_batch: warn-only schema — batch not rejected");
+  {
+    const warnCh = ch("batch-warn-schema");
+    const warnSchema = JSON.stringify({
+      type: "object",
+      required: ["type", "task_id"],
+      properties: {
+        type:    { type: "string" },
+        task_id: { type: "string" },
+      },
+    });
+    // Register warn-only (strict: false)
+    await call(a, "register_channel_schema", { channel: warnCh, schema: warnSchema, strict: false });
+
+    // Batch with one invalid message (missing type+task_id) — warn-only, should not abort
+    const r = await callRaw(a, "send_message_batch", {
+      messages: [
+        { channel: warnCh, sender: "orch", content: JSON.stringify({ foo: "bar" }) },
+        { channel: warnCh, sender: "orch", content: JSON.stringify({ type: "task", task_id: `wn-${RUN}` }) },
+      ],
+    });
+    assert(!r.isError, `batch warn-only: batch not rejected (isError=${r.isError})`);
+    assert(r.content[0].text.includes("Sent 2 messages"), `batch warn-only: 2 messages sent (got: ${r.content[0].text.slice(0, 60)})`);
+
+    // Verify both messages were actually stored
+    const msgs = await call(a, "read_messages", { channel: warnCh, since_id: 0 });
+    const storedLines = msgs.trim().split("\n").filter(l => l.match(/\[#\d+\]/));
+    assert(storedLines.length === 2, `batch warn-only: both messages stored (got ${storedLines.length})`);
+
+    await call(a, "purge_channel",       { channel: warnCh });
+    await call(a, "clear_channel_schema", { channel: warnCh });
   }
 
   // ── Teardown ──────────────────────────────────────────────────────────────────
