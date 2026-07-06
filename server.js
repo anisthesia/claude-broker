@@ -109,10 +109,14 @@ const stmtChansByPrefix = db.prepare("SELECT DISTINCT channel FROM messages WHER
 const stmtPurge        = db.prepare("DELETE FROM messages WHERE channel = ?");
 const stmtPruneOlder   = db.prepare("DELETE FROM messages WHERE channel = ? AND created_at < ?");
 const stmtPruneAllOld  = db.prepare("DELETE FROM messages WHERE channel NOT IN (SELECT value FROM json_each(?)) AND created_at < ?");
+// summary must come from the newest result row (highest id), not a lexicographic MAX
+// over summary strings — a stale 'PASS — ...' would shadow a later 'FAIL — ...'.
+// SQLite guarantees bare columns resolve from the MAX(id) row when the query has a
+// single min()/max() aggregate.
 const stmtCheckResult  = db.prepare(`
   SELECT COUNT(*) AS n,
-         MAX(CASE WHEN json_valid(content) AND json_extract(content, '$.type') = 'result'
-                  THEN json_extract(content, '$.summary') END) AS summary
+         MAX(id) AS latest_id,
+         json_extract(content, '$.summary') AS summary
   FROM messages WHERE channel = ? AND json_valid(content)
     AND json_extract(content, '$.task_id') = ? AND json_extract(content, '$.type') = 'result'
 `);
