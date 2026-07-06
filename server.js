@@ -1299,6 +1299,16 @@ function auth(req, res, next) {
   }
   next();
 }
+
+// Dashboard auth — browsers can't set an Authorization header on page loads,
+// so the dashboard routes also accept ?token=<secret>. Rendered links must
+// propagate the token (see tokenParam in the dashboard handlers).
+function dashboardAuth(req, res, next) {
+  if (!SHARED_SECRET) return next();
+  const header = req.headers.authorization || "";
+  if (header === `Bearer ${SHARED_SECRET}` || req.query.token === SHARED_SECRET) return next();
+  return res.status(401).json({ error: "Unauthorized" });
+}
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now(), uptime_s: Math.floor((Date.now() - startedAt) / 1000) }));
@@ -1467,7 +1477,7 @@ function escHtml(s) {
 }
 
 // Dashboard
-app.get("/dashboard", (req, res) => {
+app.get("/dashboard", dashboardAuth, (req, res) => {
   const now         = Date.now();
   const allChannels = stmtChans.all();
   const allCaps     = stmtCapList.all();
@@ -1485,6 +1495,7 @@ app.get("/dashboard", (req, res) => {
   const selectedNs = req.query.ns || "all";
   const isAll      = selectedNs === "all";
   const live       = req.query.live === "1";
+  const tokenParam = req.query.token ? `token=${encodeURIComponent(req.query.token)}` : "";
 
   function matchesNs(ch) { return isAll || nsOf(ch) === selectedNs; }
 
@@ -1658,6 +1669,7 @@ app.get("/dashboard", (req, res) => {
     if (selectedNs !== "all") p.push(`ns=${selectedNs}`);
     if (live) p.push("live=1");
     if (showAll) p.push("feed=all");
+    if (tokenParam) p.push(tokenParam);
     return `/dashboard${p.length ? "?" + p.join("&") : ""}`;
   };
 
@@ -1729,6 +1741,7 @@ app.get("/dashboard", (req, res) => {
     const params = [];
     if (ns !== "all") params.push(`ns=${ns}`);
     if (lv) params.push("live=1");
+    if (tokenParam) params.push(tokenParam);
     return `/dashboard${params.length ? "?" + params.join("&") : ""}`;
   };
 
@@ -1754,7 +1767,7 @@ app.get("/dashboard", (req, res) => {
       try { const p = JSON.parse(text); text = p.subject || p.type || text; } catch {}
       preview = `<span class="preview">${escHtml(String(text).slice(0,80))}${text.length > 80 ? "…" : ""}</span>`;
     }
-    const chanHref = `/dashboard/channel?name=${encodeURIComponent(r.channel)}${selectedNs !== "all" ? `&ns=${selectedNs}` : ""}`;
+    const chanHref = `/dashboard/channel?name=${encodeURIComponent(r.channel)}${selectedNs !== "all" ? `&ns=${selectedNs}` : ""}${tokenParam ? `&${tokenParam}` : ""}`;
     return `<tr>
       <td><a href="${chanHref}" class="chan-link">${escHtml(r.channel)}</a>${exempt}${schema}</td>
       <td>${r.n}</td>
@@ -2033,7 +2046,8 @@ function workerAction(name, action) {
   const btn = event.target;
   btn.disabled = true;
   btn.textContent = action === 'start' ? 'Starting…' : 'Stopping…';
-  fetch('/workers/' + encodeURIComponent(name) + '/' + action, { method: 'POST' })
+  const token = new URLSearchParams(location.search).get('token');
+  fetch('/workers/' + encodeURIComponent(name) + '/' + action, { method: 'POST', headers: token ? { 'Authorization': 'Bearer ' + token } : {} })
     .then(r => r.json())
     .then(d => { if (d.ok) location.reload(); else { alert(d.error || 'Error'); btn.disabled = false; btn.textContent = action === 'start' ? 'Start' : 'Stop'; } })
     .catch(() => { alert('Request failed'); btn.disabled = false; });
@@ -2043,7 +2057,7 @@ function workerAction(name, action) {
 });
 
 // Channel message viewer
-app.get("/dashboard/channel", (req, res) => {
+app.get("/dashboard/channel", dashboardAuth, (req, res) => {
   const channel = req.query.name;
   const backNs  = req.query.ns || "all";
   const limit   = Math.min(parseInt(req.query.limit || "50", 10), 200);
@@ -2051,7 +2065,10 @@ app.get("/dashboard/channel", (req, res) => {
 
   if (!channel) return res.status(400).send("channel required");
 
-  const backHref = backNs === "all" ? "/dashboard" : `/dashboard?ns=${backNs}`;
+  const tokenParam = req.query.token ? `token=${encodeURIComponent(req.query.token)}` : "";
+  const backHref = backNs === "all"
+    ? `/dashboard${tokenParam ? "?" + tokenParam : ""}`
+    : `/dashboard?ns=${backNs}${tokenParam ? "&" + tokenParam : ""}`;
 
   const rows = db.prepare(
     `SELECT id, sender, content, created_at FROM messages WHERE channel = ? AND id > ? ORDER BY id DESC LIMIT ?`
@@ -2097,7 +2114,7 @@ app.get("/dashboard/channel", (req, res) => {
     : '<span style="color:#484f58">no schema</span>';
 
   const olderHref = rows.length === limit
-    ? `/dashboard/channel?name=${encodeURIComponent(channel)}&ns=${backNs}&limit=${limit}&since_id=${rows[rows.length-1].id - 1}`
+    ? `/dashboard/channel?name=${encodeURIComponent(channel)}&ns=${backNs}&limit=${limit}&since_id=${rows[rows.length-1].id - 1}${tokenParam ? `&${tokenParam}` : ""}`
     : null;
 
   res.send(`<!DOCTYPE html>
