@@ -289,17 +289,32 @@ async function run() {
 
   // ── 10. Dashboard HTTP ────────────────────────────────────────────────────
   console.log("\n10. Dashboard");
-  const dashRes = await fetch("http://localhost:8080/dashboard");
-  assert(dashRes.ok, `dashboard HTTP ${dashRes.status} OK`);
+  const httpBase = new URL(BROKER_URL).origin;
+
+  // Unauthenticated requests must be rejected on both dashboard routes
+  const dashNoAuth = await fetch(`${httpBase}/dashboard`);
+  assert(dashNoAuth.status === 401, `dashboard unauthenticated HTTP ${dashNoAuth.status} = 401`);
+  const chanNoAuth = await fetch(`${httpBase}/dashboard/channel?name=${ch}`);
+  assert(chanNoAuth.status === 401, `dashboard/channel unauthenticated HTTP ${chanNoAuth.status} = 401`);
+
+  // ?token= auth
+  const dashRes = await fetch(`${httpBase}/dashboard?token=${encodeURIComponent(SECRET)}`);
+  assert(dashRes.ok, `dashboard ?token= HTTP ${dashRes.status} OK`);
   const dashHtml = await dashRes.text();
   assert(dashHtml.includes("claude-broker"), "dashboard HTML contains title");
   assert(dashHtml.includes("v2.0.0"), "dashboard HTML shows v2.0.0");
   assert(dashHtml.includes("Channels"), "dashboard HTML has Channels section");
   assert(dashHtml.includes("Worker Capabilities"), "dashboard HTML has Capabilities section");
 
+  // Bearer-header auth
+  const dashBearer = await fetch(`${httpBase}/dashboard`, { headers: { Authorization: `Bearer ${SECRET}` } });
+  assert(dashBearer.ok, `dashboard Bearer HTTP ${dashBearer.status} OK`);
+  const chanBearer = await fetch(`${httpBase}/dashboard/channel?name=${ch}`, { headers: { Authorization: `Bearer ${SECRET}` } });
+  assert(chanBearer.ok, `dashboard/channel Bearer HTTP ${chanBearer.status} OK`);
+
   // ── 11. Health endpoint includes uptime_s ────────────────────────────────
   console.log("\n11. Health endpoint");
-  const healthRes = await fetch("http://localhost:8080/health");
+  const healthRes = await fetch(`${httpBase}/health`);
   const health = await healthRes.json();
   assert(typeof health.uptime_s === "number" && health.uptime_s >= 0, `health includes uptime_s=${health.uptime_s}`);
 
