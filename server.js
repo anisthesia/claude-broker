@@ -1352,9 +1352,19 @@ app.post("/messages", auth, (req, res) => {
   if (!isValidChannelName(channel))
     return res.status(400).json({ error: `invalid channel name: control characters are not allowed` });
   const contentStr = typeof content === "string" ? content : JSON.stringify(content);
+  // Enforce channel schemas exactly like MCP send_message: strict → reject, warn-only → log + accept.
+  const check = validateContent(channel, contentStr);
+  if (!check.ok && check.strict) {
+    return res.status(400).json({ error: `schema validation failed on '${channel}': ${check.errors}` });
+  }
+  if (!check.ok && !check.strict) {
+    console.warn(`[claude-broker] WARN schema mismatch on '${channel}' (POST /messages): ${check.errors}`);
+  }
   const row = stmtInsert.run(channel, sender, contentStr, Date.now());
   messageBus.emit(`msg:${channel}`, { id: row.lastInsertRowid, channel, sender, content: contentStr });
-  res.json({ id: row.lastInsertRowid, channel, sender });
+  const out = { id: row.lastInsertRowid, channel, sender };
+  if (!check.ok && !check.strict) out.warn = `schema mismatch: ${check.errors}`;
+  res.json(out);
 });
 
 // ── Worker control endpoints ───────────────────────────────────────────────────
