@@ -5,12 +5,15 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import "dotenv/config";
 
 const BROKER_URL = process.env.BROKER_URL || "http://localhost:8080/mcp";
 const SECRET = process.env.SHARED_SECRET || "";
 
-const ajv = new Ajv();
+// Mirror server.js Ajv config so schemas that compile there compile here
+const ajv = new Ajv({ allErrors: true, strict: false });
+addFormats(ajv);
 
 async function connect(name) {
   const headers = SECRET ? { Authorization: `Bearer ${SECRET}` } : {};
@@ -18,6 +21,29 @@ async function connect(name) {
   const client = new Client({ name, version: "1.0.0" });
   await client.connect(transport);
   return { client, transport };
+}
+
+// read_messages emits lines like: [#42] 2026-07-06T08:00:00.000Z <sender>: {"type":...}
+// plus a trailing "(next since_id: N)" line; content may span multiple lines.
+const MSG_LINE = /^\[#(\d+)\] (\S+) <([^>]*)>: (.*)$/;
+
+function parseMessages(text) {
+  if (!text || text.startsWith("No new messages")) return [];
+  const raw = [];
+  for (const line of text.split("\n")) {
+    if (/^\(next since_id: \d+\)$/.test(line.trim())) continue;
+    const m = line.match(MSG_LINE);
+    if (m) {
+      raw.push({ id: parseInt(m[1], 10), timestamp: m[2], sender: m[3], text: m[4] });
+    } else if (raw.length > 0) {
+      raw[raw.length - 1].text += "\n" + line;
+    }
+  }
+  return raw.map(r => {
+    let content = null; // null = non-JSON; server skips validation for these
+    try { content = JSON.parse(r.text); } catch {}
+    return { id: r.id, timestamp: r.timestamp, sender: r.sender, content };
+  });
 }
 
 function extractJsonFromSchemaResponse(text) {
@@ -79,33 +105,26 @@ async function main() {
       const res = await client.callTool({ name: "read_messages", arguments: { channel, limit: 20 } });
       const text = res.content[0]?.text;
       if (text) {
-        // Parse the text response (line-separated message format)
-        messages = text.split('\n').filter(line => line.trim()).map(line => {
-          const tabIndex = line.indexOf('\t');
-          if (tabIndex === -1) return null;
-          const id = parseInt(line.substring(0, tabIndex));
-          const remainder = line.substring(tabIndex + 1);
-          const parts = remainder.split('\t');
-          if (parts.length < 3) return null;
-          const timestamp = parts[0];
-          const sender = parts[1];
-          const content = parts.slice(2).join('\t');
-          try {
-            return { id, timestamp, sender, content: JSON.parse(content) };
-          } catch {
-            return { id, timestamp, sender, content: {} };
-          }
-        }).filter(m => m !== null);
+        messages = parseMessages(text);
       }
     } catch {
       // No messages
     }
 
-    // Validate messages
+    // Validate messages (compile once per channel, like server.js)
     const violations = [];
-    for (const msg of messages) {
-      try {
-        const validate = ajv.compile(schema);
+    let validate = null;
+    let compileError = null;
+    try {
+      validate = ajv.compile(schema);
+    } catch (err) {
+      compileError = err.message;
+    }
+    if (compileError) {
+      violations.push({ msg_id: null, errors: [{ message: `Schema failed to compile: ${compileError}` }] });
+    } else {
+      for (const msg of messages) {
+        if (msg.content === null) continue; // non-JSON content — server skips validation too
         const valid = validate(msg.content);
         if (!valid) {
           violations.push({
@@ -117,11 +136,6 @@ async function main() {
             }))
           });
         }
-      } catch (err) {
-        violations.push({
-          msg_id: msg.id,
-          errors: [{ message: `Schema validation error: ${err.message}` }]
-        });
       }
     }
 
