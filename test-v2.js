@@ -312,6 +312,14 @@ async function run() {
   const chanBearer = await fetch(`${httpBase}/dashboard/channel?name=${ch}`, { headers: { Authorization: `Bearer ${SECRET}` } });
   assert(chanBearer.ok, `dashboard/channel Bearer HTTP ${chanBearer.status} OK`);
 
+  // /mcp auth: missing and wrong Bearer must both be rejected
+  const mcpBody = JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 });
+  const mcpHeaders = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const mcpNoAuth = await fetch(`${httpBase}/mcp`, { method: "POST", headers: mcpHeaders, body: mcpBody });
+  assert(mcpNoAuth.status === 401, `/mcp missing Bearer HTTP ${mcpNoAuth.status} = 401`);
+  const mcpWrong = await fetch(`${httpBase}/mcp`, { method: "POST", headers: { ...mcpHeaders, Authorization: "Bearer wrong-token" }, body: mcpBody });
+  assert(mcpWrong.status === 401, `/mcp wrong Bearer HTTP ${mcpWrong.status} = 401`);
+
   // ── 11. Health endpoint includes uptime_s ────────────────────────────────
   console.log("\n11. Health endpoint");
   const healthRes = await fetch(`${httpBase}/health`);
