@@ -2,6 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Dollex ERP worker-inbox envelope (dx-api / dx-web / dx-db / dx-qa)",
   "description": "Messages dispatched by the orchestrator into a worker inbox.",
+  "version": "1.1",
   "type": "object",
   "required": ["type", "task_id", "from", "to", "subject"],
   "properties": {
@@ -34,7 +35,64 @@
       "description": "Required on type:contract-change."
     },
     "body": {},
-    "refs": { "type": "array" }
+    "refs": { "type": "array" },
+    "context": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One sentence explaining why this task exists. Helps workers make judgment calls."
+    },
+    "background": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional 2-3 sentences of deeper context — prior decisions, related tasks, what failed before."
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["small", "medium", "large"],
+      "description": "Complexity hint: small (<30 min), medium (30-90 min), large (>90 min, expect context rotation)."
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "read": { "type": "array", "items": { "type": "string" } },
+        "write": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false,
+      "description": "Per-task file scope. write lists files this task is expected to modify."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "run", "pass_condition"],
+        "properties": {
+          "name": { "type": "string" },
+          "run": { "type": "string", "description": "Exact shell command to execute." },
+          "pass_condition": { "type": "string", "description": "What a passing result looks like." }
+        },
+        "additionalProperties": false
+      },
+      "description": "Executable checks with pass conditions. Replaces vague required_checks labels."
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Per-task do-NOT rules the worker must obey even when they conflict with defaults."
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Checklist of deliverables the worker must confirm before posting type:result."
+    },
+    "result_template": {
+      "type": "object",
+      "description": "Skeleton JSON the worker fills in for the result body; ensures required fields are present.",
+      "additionalProperties": true
+    },
+    "baseline_task_id": {
+      "type": "string",
+      "description": "task_id of the sprint baseline run this task builds on."
+    }
   },
   "allOf": [
     {
