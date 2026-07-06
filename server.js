@@ -491,11 +491,15 @@ function buildServer() {
       filter_sender: z.string().optional().describe("Only wake/return for messages from this sender."),
       filter_type:   z.string().optional().describe("Only wake/return for messages where JSON content.type === this value."),
     },
-  }, async ({ channel, since_id, timeout_ms, limit, filter_sender, filter_type }) => {
+  }, async ({ channel, since_id, timeout_ms, limit, filter_sender, filter_type }, extra) => {
     const sinceId = since_id ?? 0;
     const lim     = limit ?? 100;
     const timeout = Math.min(timeout_ms ?? 60000, 300000);
     const event   = `msg:${channel}`;
+    // Aborted by the SDK when the client disconnects (transport.close() on res 'close'
+    // in the /mcp handler) — without it, the listener + timer below would linger for
+    // the full timeout (up to 300s) after the caller is gone.
+    const signal  = extra?.signal;
 
     return new Promise((resolve) => {
       let timer = null;
@@ -504,6 +508,7 @@ function buildServer() {
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onMessage);
+        signal?.removeEventListener("abort", onAbort);
       }
 
       function settle(result) {
@@ -518,6 +523,14 @@ function buildServer() {
         if (rows.length > 0) settle(formatRows(rows, channel, sinceId));
         // Non-matching message — keep listener registered, timer keeps running
       }
+
+      function onAbort() {
+        // Client gone — response is never delivered; settle only to free listener + timer.
+        settle({ content: [{ type: "text", text: `Wait on '${channel}' aborted — client disconnected.` }] });
+      }
+
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort);
 
       // Register listener BEFORE initial DB check to close the race window:
       // a send_message that arrives between check and registration would be missed.
@@ -559,10 +572,12 @@ function buildServer() {
       watch_channel: z.string().optional().describe("Channel to watch for result messages. Default: dv-status."),
       timeout_ms:    z.number().int().positive().max(300000).optional().describe("Max wait in ms. Default 60000. Max 300000."),
     },
-  }, async ({ channel, sender, content, depends_on, watch_channel, timeout_ms }) => {
+  }, async ({ channel, sender, content, depends_on, watch_channel, timeout_ms }, extra) => {
     const watchChan = watch_channel ?? "dv-status";
     const timeout   = Math.min(timeout_ms ?? 60000, 300000);
     const event     = `msg:${watchChan}`;
+    // Same disconnect-cleanup contract as wait_for_messages.
+    const signal    = extra?.signal;
 
     function allSatisfied() {
       return depends_on.every(taskId => stmtCheckResult.get(watchChan, taskId).n > 0);
@@ -590,6 +605,7 @@ function buildServer() {
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onResult);
+        signal?.removeEventListener("abort", onAbort);
       }
 
       function settle(result) {
@@ -597,6 +613,11 @@ function buildServer() {
         settled = true;
         cleanup();
         resolve(result);
+      }
+
+      function onAbort() {
+        // Client gone — do NOT post the gated message on a dead request; just free resources.
+        settle({ content: [{ type: "text", text: `Gated post to '${channel}' aborted — client disconnected.` }], isError: true });
       }
 
       function tryPost() {
@@ -615,6 +636,9 @@ function buildServer() {
         if (!allSatisfied()) return;
         tryPost();
       }
+
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort);
 
       // Register listener BEFORE re-check so no result event is missed between
       // the initial allSatisfied() check above and this listener registration.
