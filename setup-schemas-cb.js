@@ -24,7 +24,7 @@ const REGISTRATIONS = [
   { channel: "cb-orchestrator", file: "schemas/cb-orchestrator-inbox.json", strict: true },
   { channel: "cb-control",      file: "schemas/cb-control.json",           strict: true },
   { channel: "cb-telemetry",    file: "schemas/cb-telemetry.json",         strict: true },
-  { channel: "cb-status",       file: "schemas/cb-status.json",            strict: true },
+  { channel: "cb-status",       file: "schemas/cb-status.json",            strict: false },
   { channel: "cb-backlog",      file: "schemas/cb-backlog.json",           strict: true },
   { channel: "cb-reviewer",     file: "schemas/reviewer-inbox.json",       strict: true },
 ];
@@ -45,7 +45,7 @@ async function main() {
     const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: strictMode, version: "1.0" },
+      arguments: { channel, schema, strict: strictMode, version: JSON.parse(schema).version || "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(18)} ← ${file}`);

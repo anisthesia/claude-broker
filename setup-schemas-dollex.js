@@ -17,12 +17,12 @@ const STRICT     = process.env.STRICT === "1";
 
 // 4 worker inboxes share the same schema; status, control, telemetry, backlog are distinct
 const REGISTRATIONS = [
-  { channel: "dx-api",       file: "schemas/dx-worker-inbox.json", strict: true },
-  { channel: "dx-web",       file: "schemas/dx-worker-inbox.json", strict: true },
-  { channel: "dx-db",        file: "schemas/dx-worker-inbox.json", strict: true },
-  { channel: "dx-qa",        file: "schemas/dx-worker-inbox.json", strict: true },
+  { channel: "dx-api",       file: "schemas/dx-worker-inbox.json", strict: false },
+  { channel: "dx-web",       file: "schemas/dx-worker-inbox.json", strict: false },
+  { channel: "dx-db",        file: "schemas/dx-worker-inbox.json", strict: false },
+  { channel: "dx-qa",        file: "schemas/dx-worker-inbox.json", strict: false },
   { channel: "dx-status",    file: "schemas/dx-status.json", strict: true },
-  { channel: "dx-control",   file: "schemas/dx-control.json", strict: true },
+  { channel: "dx-control",   file: "schemas/dx-control.json", strict: false },
   { channel: "dx-telemetry", file: "schemas/dx-telemetry.json", strict: true },
   { channel: "dx-backlog",   file: "schemas/dx-backlog.json", strict: true },
 ];
@@ -43,7 +43,7 @@ async function main() {
     const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: strictMode, version: "1.0" },
+      arguments: { channel, schema, strict: strictMode, version: JSON.parse(schema).version || "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(16)} ← ${file}`);

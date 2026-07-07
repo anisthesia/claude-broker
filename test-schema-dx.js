@@ -186,6 +186,12 @@ async function testControl(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid approval-token with full body accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendx_2026_07_07_ctrl_tok_nobody = { ...validToken, task_id: "dx-2026-07-07-ctrl-tok-nobody" };
+  delete bodylessTokendx_2026_07_07_ctrl_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendx_2026_07_07_ctrl_tok_nobody);
+  expect(/WARN/.test(t), "control: bodyless approval-token → warn (body required)", t);
+
   // 3. Valid type:contract-change with wire_compat
   const validContract = {
     type: "contract-change",
@@ -559,6 +565,12 @@ async function testWorkerInbox(client) {
   };
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token accepted, no warn", t);
+
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendx_2026_07_07_wi_tok_nobody = { ...validToken, task_id: "dx-2026-07-07-wi-tok-nobody" };
+  delete bodylessTokendx_2026_07_07_wi_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendx_2026_07_07_wi_tok_nobody);
+  expect(/WARN/.test(t), "worker-inbox: bodyless approval-token → warn (body required)", t);
 
   // 6. type:contract-change without wire_compat → warn
   const contractNoCompat = {

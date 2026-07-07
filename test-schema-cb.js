@@ -468,7 +468,7 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoConsent);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result without consent_basis → accepted (optional)", t);
 
-  // 5. type:result with commits but no affected_files → accepted (affected_files is optional)
+  // 5. type:result with commits but no affected_files → warn (v1.1 conditional)
   const resultNoAffected = {
     type: "result",
     task_id: "cb-2026-06-19-st-r04",
@@ -482,7 +482,29 @@ async function testStatus(client) {
     },
   };
   t = await send(client, ch, resultNoAffected);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits but no affected_files → accepted (optional)", t);
+  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+
+  // 5a. type:result production_touching=true without consent_basis → warn (v1.1 conditional)
+  const resultProdNoConsent = {
+    type: "result",
+    task_id: "cb-2026-06-19-st-r04a",
+    from: "core",
+    to: "orchestrator",
+    subject: "restarted broker",
+    summary: "PASS — broker restarted",
+    body: { production_touching: true },
+  };
+  t = await send(client, ch, resultProdNoConsent);
+  expect(/WARN/.test(t), "status: type:result production_touching=true without consent_basis → warn", t);
+
+  // 5b. type:result production_touching=true with consent_basis → no warn
+  const resultProdWithConsent = {
+    ...resultProdNoConsent,
+    task_id: "cb-2026-06-19-st-r04b",
+    body: { production_touching: true, consent_basis: "approval-token:#41925" },
+  };
+  t = await send(client, ch, resultProdWithConsent);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true with consent_basis accepted", t);
 
   // 6. type:result with commits AND affected_files → no warn
   const resultWithAffected = {

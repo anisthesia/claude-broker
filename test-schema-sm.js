@@ -407,6 +407,42 @@ async function testStatus(client) {
   t = await send(client, ch, missingTaskId);
   expect(/WARN/.test(t), "status: missing task_id → warn in warn-only", t);
 
+  // 6a. type:result with commits but no affected_files → warn (v1.1 conditional)
+  const resultCommitsNoAffected = {
+    type: "result",
+    task_id: "sm-2026-07-07-st-inv1",
+    from: "backend",
+    to: "orchestrator",
+    subject: "committed payout fix",
+    summary: "PASS — payout fix committed",
+    body: { commits: [{ sha: "abc1234", branch: "main", message: "fix payouts" }] },
+  };
+  t = await send(client, ch, resultCommitsNoAffected);
+  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+
+  // 6b. type:result with commits AND affected_files → no warn
+  const resultCommitsWithAffected = { ...resultCommitsNoAffected, task_id: "sm-2026-07-07-st-inv2", affected_files: ["src/payouts.js"] };
+  t = await send(client, ch, resultCommitsWithAffected);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits and affected_files accepted", t);
+
+  // 6c. type:result production_touching=true without consent_basis → warn (v1.1 conditional)
+  const resultProdNoConsent = {
+    type: "result",
+    task_id: "sm-2026-07-07-st-inv3",
+    from: "backend",
+    to: "orchestrator",
+    subject: "deployed payout fix",
+    summary: "PASS — deployed",
+    body: { production_touching: true },
+  };
+  t = await send(client, ch, resultProdNoConsent);
+  expect(/WARN/.test(t), "status: type:result production_touching=true without consent_basis → warn", t);
+
+  // 6d. type:result production_touching=true with consent_basis → no warn
+  const resultProdWithConsent = { ...resultProdNoConsent, task_id: "sm-2026-07-07-st-inv4", body: { production_touching: true, consent_basis: "terminal-human" } };
+  t = await send(client, ch, resultProdWithConsent);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true with consent_basis accepted", t);
+
   // 7. Flip to strict; type:result without summary → rejected
   r = await registerSchema(client, ch, file, true);
   expect(/Registered schema/.test(r.content?.[0]?.text), "status: schema re-registered strict");
