@@ -1088,12 +1088,21 @@ function buildServer() {
       content: z.string().min(1).describe("Heartbeat payload — plain text or JSON-as-string."),
     },
   }, async ({ channel, sender, content }) => {
+    // Enforce channel schemas exactly like send_message: strict → reject, warn-only → warn + accept.
+    const check = validateContent(channel, content);
+    if (!check.ok && check.strict) {
+      return { content: [{ type: "text", text: `schema validation failed on '${channel}': ${check.errors}. Call get_channel_schema('${channel}') to see required fields.` }], isError: true };
+    }
+    if (!check.ok && !check.strict) {
+      console.warn(`[claude-broker] WARN schema mismatch on '${channel}' (upsert_heartbeat): ${check.errors}`);
+    }
     const now = Date.now();
     const r   = stmtInsert.run(channel, sender, content, now);
     const id  = r.lastInsertRowid;
     stmtDeleteOtherHeartbeats.run(channel, sender, id);
     messageBus.emit(`msg:${channel}`, { id, sender, content });
-    return { content: [{ type: "text", text: `Heartbeat #${id} posted for '${sender}' on '${channel}' at ${new Date(now).toISOString()}.` }] };
+    const warn = (!check.ok && !check.strict) ? `  [WARN schema mismatch: ${check.errors}]` : "";
+    return { content: [{ type: "text", text: `Heartbeat #${id} posted for '${sender}' on '${channel}' at ${new Date(now).toISOString()}.${warn}` }] };
   });
 
   // ── sprint_summary ───────────────────────────────────────────────────────────
