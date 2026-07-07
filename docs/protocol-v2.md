@@ -56,8 +56,9 @@ JSON-as-string in `content`, new `type: "heartbeat"`.
   "activity": {
     "last_tool_call_ts": "2026-05-27T17:59:42Z",
     "current_task_id": "fix-2026-05-27-loyalty-03",
-    "state": "working" | "idle-polling" | "blocked-on-question" | "rotating"
+    "state": "working" | "idle-polling" | "blocked-on-question" | "rotating" | "idle-exit" | "session-end" | "reviewing" | "coverage-patrol"
   },
+  "exit_code": 0,
   "cost_since_start": {
     "input_tokens": 18432,
     "output_tokens": 281443,
@@ -446,7 +447,7 @@ Before calling `scripts/sprint-close-merge.sh`, add this step:
 All schemas registered warn-only (strict=false). Flip to strict only after two
 clean sprints with no `[claude-broker] schema warn` lines in broker logs.
 
-Registration script: `node setup-schemas-broker.js` (re-run is idempotent).
+Registration scripts (one per namespace, re-runs are idempotent): `node setup-schemas.js` (dv), `node setup-schemas-cb.js` (cb), `node setup-schemas-dollex.js` (dx), `node setup-schemas-ridepro.js` (rp), `node setup-schemas-sm.js` (sm). Strict flags and versions live in each script + schema file — they are the source of truth for registration state.
 
 ### dogsvilla (`dv-` namespace)
 
@@ -465,14 +466,16 @@ Registered via `node setup-schemas.js`.
 
 | Channel | Schema file | Registered | Strict |
 |---|---|---|---|
-| `cb-core` | `schemas/cb-worker-inbox.json` | 2026-06-19 | warn-only |
-| `cb-protocol-qa` | `schemas/cb-worker-inbox.json` | 2026-06-19 | warn-only |
-| `cb-orchestrator` | `schemas/cb-orchestrator-inbox.json` | 2026-06-19 | warn-only |
-| `cb-control` | `schemas/cb-control.json` | 2026-06-19 | warn-only |
-| `cb-status` | `schemas/cb-status.json` | 2026-06-19 | warn-only |
-| `cb-telemetry` | `schemas/cb-telemetry.json` | 2026-06-19 | warn-only |
+| `cb-core` | `schemas/cb-worker-inbox.json` | 2026-06-19 | strict |
+| `cb-protocol-qa` | `schemas/cb-worker-inbox.json` | 2026-06-19 | strict |
+| `cb-orchestrator` | `schemas/cb-orchestrator-inbox.json` | 2026-06-19 | strict |
+| `cb-control` | `schemas/cb-control.json` | 2026-06-19 | strict |
+| `cb-status` | `schemas/cb-status.json` | 2026-06-19 | warn-only (v1.1 invariants added 2026-07-07; flip next sprint) |
+| `cb-telemetry` | `schemas/cb-telemetry.json` | 2026-06-19 | strict |
+| `cb-backlog` | `schemas/cb-backlog.json` | 2026-06-23 | strict |
+| `cb-reviewer` | `schemas/reviewer-inbox.json` | 2026-06-23 | strict |
 
-Registered via `node setup-schemas-broker.js`.
+Registered via `node setup-schemas-cb.js` (setup-schemas-broker.js was retired 2026-07-07 — it re-registered with stale strict flags and omitted cb-reviewer).
 
 Key cb-* schema constraints:
 - `cb-status` type:result requires `summary` and `body.consent_basis`. Use
