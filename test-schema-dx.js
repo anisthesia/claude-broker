@@ -405,11 +405,16 @@ async function testTelemetry(client) {
   expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: valid heartbeat accepted, no warn", t);
 
   // 2. All valid activity states
-  for (const state of ["idle-polling", "blocked-on-question", "rotating"]) {
+  for (const state of ["idle-polling", "idle-exit", "blocked-on-question", "rotating", "session-end", "reviewing", "coverage-patrol"]) {
     const hb = { ...validHB, activity: { state } };
     t = await send(client, ch, hb);
     expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
   }
+
+  // exit_code allowed top-level on session-end heartbeats (v1.1)
+  const withExitCode = { ...validHB, activity: { state: "session-end" }, exit_code: 0 };
+  t = await send(client, ch, withExitCode);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: session-end heartbeat with exit_code accepted", t);
 
   // 3. Heartbeat missing context.rotation_recommended → warn
   const missingRotation = {
