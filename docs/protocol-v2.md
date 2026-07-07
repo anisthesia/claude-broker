@@ -10,7 +10,7 @@ Drafted 2026-05-27 from the dogsvilla pilot cost analysis.
 | Spec | Status | Notes |
 |---|---|---|
 | Spec 1 — Heartbeat + telemetry channel | **Implemented** | `upsert_heartbeat`, `get_latest_per_sender` tools live; dv-telemetry + cb-telemetry registered |
-| Spec 2 — Broker-side envelope validator | **Implemented** | `register_channel_schema`, warn-only mode live; dv-* and cb-* schemas registered |
+| Spec 2 — Broker-side envelope validator | **Implemented** | `register_channel_schema`, strict + warn-only modes live; schemas registered across all five namespaces (dv, cb, dx, rp, sm) |
 | Spec 3 — Sprint-close conflict pre-flight | **Implemented** | `sprint_file_conflicts` tool live; dv-status schema enforces `affected_files` |
 
 Motivating data: the dogsvilla pilot (4 sessions, 34h, 4815 turns) cost
@@ -444,38 +444,113 @@ Before calling `scripts/sprint-close-merge.sh`, add this step:
 
 ## Schema registry — current coverage
 
-All schemas registered warn-only (strict=false). Flip to strict only after two
-clean sprints with no `[claude-broker] schema warn` lines in broker logs.
+**Current posture (verified against live `list_channel_schemas`, 2026-07-07):**
+validation is mixed strict/warn-only. System channels (backlogs, telemetry,
+reviewer inboxes, orchestrator inboxes, `dv-status`/`dx-status`, cb worker
+inboxes) are strict. Twenty channels tightened by
+`cb-2026-07-06-status-invariants` were re-registered warn-only for one
+observation sprint (rp and dv sessions were live during the tightening) and
+are scheduled to flip strict next sprint. Legacy dv topic channels (registered
+2026-06-03, no version stamp) and most of the sm namespace are warn-only with
+no scheduled flip.
 
 Registration scripts (one per namespace, re-runs are idempotent): `node setup-schemas.js` (dv), `node setup-schemas-cb.js` (cb), `node setup-schemas-dollex.js` (dx), `node setup-schemas-ridepro.js` (rp), `node setup-schemas-sm.js` (sm). Strict flags and versions live in each script + schema file — they are the source of truth for registration state.
 
-### dogsvilla (`dv-` namespace)
+### Warn-only channels scheduled for the next-sprint strict flip (20)
 
-| Channel | Schema file | Registered | Strict |
-|---|---|---|---|
-| `dv-backend`, `dv-frontend`, `dv-customer-portal` | `schemas/dv-worker-inbox.json` | 2026-05-27 | warn-only |
-| `dv-orchestrator` | *(uses dv-worker-inbox schema)* | 2026-05-27 | warn-only |
-| `dv-qa` | `schemas/dv-worker-inbox.json` | 2026-06-20 (sprint-009) | **strict** (flipped sprint-011) |
-| `dv-control` | `schemas/dv-control.json` | 2026-05-27 | warn-only |
-| `dv-status` | `schemas/dv-status.json` | 2026-05-27 | warn-only |
-| `dv-telemetry` | `schemas/dv-telemetry.json` | 2026-05-27 | warn-only |
+Per `cb-2026-07-06-status-invariants` (2026-07-07):
 
-Registered via `node setup-schemas.js`.
+`cb-status`, `sm-status`, `rp-status`, `rp-control`, `rp-api`, `rp-admin`,
+`rp-web`, `rp-android`, `rp-ios`, `rp-qa`, `dv-control`, `dv-backend`,
+`dv-frontend`, `dv-qa`, `dv-customer-portal`, `dx-control`, `dx-api`,
+`dx-web`, `dx-db`, `dx-qa`
 
-### claude-broker self-maintenance (`cb-` namespace)
+(`dv-customer-portal` was already warn-only before the tightening.) Flip only
+after a clean observation sprint — no `[claude-broker] schema warn` lines —
+and use `assess-dv-strict.js` to confirm real violation counts on dv channels
+before flipping them.
 
-| Channel | Schema file | Registered | Strict |
-|---|---|---|---|
-| `cb-core` | `schemas/cb-worker-inbox.json` | 2026-06-19 | strict |
-| `cb-protocol-qa` | `schemas/cb-worker-inbox.json` | 2026-06-19 | strict |
-| `cb-orchestrator` | `schemas/cb-orchestrator-inbox.json` | 2026-06-19 | strict |
-| `cb-control` | `schemas/cb-control.json` | 2026-06-19 | strict |
-| `cb-status` | `schemas/cb-status.json` | 2026-06-19 | warn-only (v1.1 invariants added 2026-07-07; flip next sprint) |
-| `cb-telemetry` | `schemas/cb-telemetry.json` | 2026-06-19 | strict |
-| `cb-backlog` | `schemas/cb-backlog.json` | 2026-06-23 | strict |
-| `cb-reviewer` | `schemas/reviewer-inbox.json` | 2026-06-23 | strict |
+### Registry — live state as of 2026-07-07
+
+Versions marked `—` predate version stamping (legacy 2026-06-03 registrations).
+
+#### `cb-` (claude-broker self-maintenance)
+
+| Channel | Strict | Version |
+|---|---|---|
+| `cb-backlog` | strict | 1.0 |
+| `cb-control` | strict | 1.0 |
+| `cb-core` | strict | 1.0 |
+| `cb-orchestrator` | strict | 1.0 |
+| `cb-protocol-qa` | strict | 1.0 |
+| `cb-reviewer` | strict | 1.0 |
+| `cb-status` | warn-only | 1.1 |
+| `cb-telemetry` | strict | 1.1 |
 
 Registered via `node setup-schemas-cb.js` (setup-schemas-broker.js was retired 2026-07-07 — it re-registered with stale strict flags and omitted cb-reviewer).
+
+#### `dv-` (dogsvilla)
+
+| Channel | Strict | Version |
+|---|---|---|
+| `dv-backlog` | strict | 1.0 |
+| `dv-consumer-status` | strict | 1.0 |
+| `dv-intel-status` | strict | 1.0 |
+| `dv-platform-status` | strict | 1.0 |
+| `dv-reviewer` | strict | 1.0 |
+| `dv-sprint-retrospective` | strict | 1.0 |
+| `dv-status` | strict | 1.0 |
+| `dv-telemetry` | strict | 1.1 |
+| `dv-backend` | warn-only | 1.1 |
+| `dv-control` | warn-only | 1.1 |
+| `dv-customer-portal` | warn-only | 1.1 |
+| `dv-frontend` | warn-only | 1.1 |
+| `dv-qa` | warn-only | 1.1 |
+| `dv-ai`, `dv-ai-ops`, `dv-commerce`, `dv-comms`, `dv-community`, `dv-consumer-orch`, `dv-content`, `dv-data`, `dv-devops`, `dv-fintech`, `dv-growth-orch`, `dv-hardware`, `dv-health`, `dv-intel-orch`, `dv-marketplace`, `dv-mobile`, `dv-partner`, `dv-pet-graph`, `dv-physical-ops`, `dv-platform-orch`, `dv-security`, `dv-seo`, `dv-supply-chain` | warn-only | — |
+
+#### `dx-` (dollex)
+
+| Channel | Strict | Version |
+|---|---|---|
+| `dx-backlog` | strict | 1.0 |
+| `dx-status` | strict | 1.1 |
+| `dx-telemetry` | strict | 1.1 |
+| `dx-control` | warn-only | 1.1 |
+| `dx-api` | warn-only | 1.2 |
+| `dx-db` | warn-only | 1.2 |
+| `dx-qa` | warn-only | 1.2 |
+| `dx-web` | warn-only | 1.2 |
+
+#### `rp-` (ridepro)
+
+| Channel | Strict | Version |
+|---|---|---|
+| `rp-backlog` | strict | 1.0 |
+| `rp-orchestrator` | strict | 1.0 |
+| `rp-reviewer` | strict | 1.0 |
+| `rp-telemetry` | strict | 1.1 |
+| `rp-admin` | warn-only | 1.1 |
+| `rp-android` | warn-only | 1.1 |
+| `rp-api` | warn-only | 1.1 |
+| `rp-control` | warn-only | 1.1 |
+| `rp-ios` | warn-only | 1.1 |
+| `rp-qa` | warn-only | 1.1 |
+| `rp-status` | warn-only | 1.1 |
+| `rp-web` | warn-only | 1.1 |
+
+#### `sm-` (sm)
+
+| Channel | Strict | Version |
+|---|---|---|
+| `sm-reviewer` | strict | 1.0 |
+| `sm-backend` | warn-only | 1.0 |
+| `sm-backlog` | warn-only | 1.0 |
+| `sm-contracts` | warn-only | 1.0 |
+| `sm-control` | warn-only | 1.0 |
+| `sm-orchestrator` | warn-only | 1.0 |
+| `sm-status` | warn-only | 1.1 |
+| `sm-telemetry` | warn-only | 1.1 |
+| `sm-web` | warn-only | 1.0 |
 
 Key cb-* schema constraints:
 - `cb-status` type:result requires `summary` and `body.consent_basis`. Use
@@ -501,19 +576,23 @@ Key cb-* schema constraints:
 ## Schema Versioning
 
 Schema versions are tracked with the `version` field on `register_channel_schema`.
-All schemas registered by the setup scripts carry `version: "1.0"` as of sprint-011
-(2026-06-20, task `cb-2026-06-20-pqa-023`).
+Since 2026-07-07 (task `cb-2026-07-06-status-invariants`) the setup scripts read
+each channel's version from its schema file instead of hardcoding `"1.0"` — the
+schema file is the source of truth for the version stamp.
 
 ### Baseline
 
-All channels in `cb-*`, `dv-*`, `rp-*`, and `dx-*` namespaces are stamped `version: 1.0`.
+Historical baseline (sprint-011): all channels in `cb-*`, `dv-*`, `rp-*`, and
+`dx-*` namespaces were stamped `version: 1.0`. Current per-channel versions
+have since diverged (1.1/1.2 after the 2026-07-06 auth-hardening sprint) —
+the registry table above is the current truth.
 
 Verify via `get_channel_schema`:
 ```
 Channel: cb-status
-Strict: on
-Version: 1.0
-Updated: 2026-06-20T05:59:55.807Z
+Strict: off
+Version: 1.1
+Updated: 2026-07-07T07:31:10.083Z
 ```
 
 ### Versioning convention
@@ -538,20 +617,18 @@ version string and file the change under the sprint's protocol-qa result.
 |---|---|---|---|
 | `dv-qa` | sprint-009 (2026-06-20) | sprint-011 (2026-06-20, pqa-024b) | `task_id` pattern `^…-[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+$` required trailing suffix; date-terminal IDs (e.g. `qa-fix-verify-bundle-gaps-2026-06-20`) are valid — suffix made optional |
 
-### Schema coverage milestone — sprint-016 (2026-06-20)
+### Schema coverage
 
-As of sprint-016, **all 36 channels** across all active namespaces are strict-validated. Zero warn-only channels remain.
+Current strict/warn-only posture per channel lives in the registry section
+above ("Schema registry — current coverage"). The 2026-07-06 auth-hardening
+sprint intentionally re-registered 20 tightened channels warn-only for an
+observation sprint; that list (and the flip schedule) is documented there.
 
-| Namespace | Channel count | Status |
-|---|---|---|
-| `cb-*` | 7 | All strict |
-| `dv-*` | 10 | All strict |
-| `rp-*` | 11 | All strict |
-| `dx-*` | 8 | All strict |
+### Test coverage
 
-### Test coverage milestone — sprint-017 (2026-06-20)
-
-`test-v2.js` now covers all **29 MCP tools** with **167 assertions** (added Section 19 in sprint-017, task `cb-2026-06-20-pqa-035`).
+`test-v2.js` covers all **31 MCP tools** (including `register_worker` and
+`deregister_worker`) with **206 assertions** as of 2026-07-07. Tool-coverage
+Section 19 was added in sprint-017 (task `cb-2026-06-20-pqa-035`).
 
 ---
 
