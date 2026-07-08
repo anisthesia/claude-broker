@@ -12,7 +12,7 @@ const __dirname = dirname(__filename);
 const BROKER_URL = process.env.BROKER_URL || "http://localhost:8080/mcp";
 const SECRET = process.env.SHARED_SECRET || "";
 
-let lastCoreId = 0;
+let lastQaId = 0;
 let lastControlId = 0;
 
 async function connect(name) {
@@ -79,17 +79,17 @@ function parseReadMessagesResponse(text) {
 }
 
 async function run() {
-  console.log("[core] Turn-start ritual...\n");
+  console.log("[protocol-qa] Turn-start ritual...\n");
 
-  const { client, transport } = await connect("core");
+  const { client, transport } = await connect("protocol-qa");
 
   try {
     // 1. Register capability
     console.log("1. Registering capability...");
     const regResult = await call(client, "register_capability", {
-      worker: "core",
-      owns: ["server.js", "MCP-tools", "DB-layer", "REST-endpoints", "watchdog-spawn"],
-      channels: ["cb-core", "cb-control", "cb-status", "cb-telemetry"]
+      worker: "protocol-qa",
+      owns: ["schemas/", "test-*.js", "setup-schemas*.js"],
+      channels: ["cb-protocol-qa", "cb-control", "cb-status", "cb-telemetry"]
     });
     console.log(`   ${regResult}\n`);
 
@@ -98,7 +98,7 @@ async function run() {
     try {
       const heartbeat = {
         type: "heartbeat",
-        from: "core",
+        from: "protocol-qa",
         ts: new Date().toISOString(),
         context: {
           size_tokens: 0,
@@ -111,7 +111,7 @@ async function run() {
       };
       const hbResult = await call(client, "upsert_heartbeat", {
         channel: "cb-telemetry",
-        sender: "core",
+        sender: "protocol-qa",
         content: JSON.stringify(heartbeat)
       });
       console.log(`   ${hbResult}\n`);
@@ -119,17 +119,17 @@ async function run() {
       console.log(`   [SOFT FAIL] Heartbeat emission failed: ${e.message}\n`);
     }
 
-    // 2. Read inbox (cb-core)
-    console.log("2. Reading cb-core inbox...");
+    // 2. Read inbox (cb-protocol-qa)
+    console.log("2. Reading cb-protocol-qa inbox...");
     const inboxResult = await call(client, "read_messages", {
-      channel: "cb-core",
-      since_id: lastCoreId,
+      channel: "cb-protocol-qa",
+      since_id: lastQaId,
       limit: 100
     });
     const inbox = parseReadMessagesResponse(inboxResult);
     console.log(`   Found ${inbox.length} message(s)`);
     if (inbox.length > 0) {
-      lastCoreId = Math.max(...inbox.map(m => m.id));
+      lastQaId = Math.max(...inbox.map(m => m.id));
       inbox.forEach(m => {
         try {
           const content = JSON.parse(m.content);
@@ -178,12 +178,12 @@ async function run() {
     console.log();
 
     // Save state for next turn
-    const stateFile = `${__dirname}/.core-state.json`;
-    fs.writeFileSync(stateFile, JSON.stringify({ lastCoreId, lastControlId }, null, 2));
+    const stateFile = `${__dirname}/.protocol-qa-state.json`;
+    fs.writeFileSync(stateFile, JSON.stringify({ lastQaId, lastControlId }, null, 2));
 
-    console.log("[core] ✓ Turn-start complete. Ready for work.");
+    console.log("[protocol-qa] ✓ Turn-start complete. Ready for work.");
     if (inbox.length === 0 && !ctrlData.pending) {
-      console.log("[core] No inbox or control messages. Exiting.");
+      console.log("[protocol-qa] No inbox or control messages. Exiting.");
     }
   } finally {
     await transport.close();
@@ -191,6 +191,6 @@ async function run() {
 }
 
 run().catch(err => {
-  console.error("[core] ERROR:", err.message);
+  console.error("[protocol-qa] ERROR:", err.message);
   process.exit(1);
 });
