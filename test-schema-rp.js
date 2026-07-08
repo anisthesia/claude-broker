@@ -173,6 +173,12 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token with full body accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokenrp_2026_07_07_wi_tok_nobody = { ...validToken, task_id: "rp-2026-07-07-wi-tok-nobody" };
+  delete bodylessTokenrp_2026_07_07_wi_tok_nobody.body;
+  t = await send(client, ch, bodylessTokenrp_2026_07_07_wi_tok_nobody);
+  expect(/WARN/.test(t), "worker-inbox: bodyless approval-token → warn (body required)", t);
+
   // 10. task with acceptance_criteria → accepted, no warn
   const taskWithCriteria = {
     type: "task",
@@ -484,7 +490,7 @@ async function testStatus(client) {
     body: { production_touching: true },
   };
   t = await send(client, ch, resultNoConsent);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true without consent_basis → accepted", t);
+  expect(/WARN/.test(t), "status: type:result production_touching=true without consent_basis → warn", t);
 
   // 5. type:result with production_touching=true AND consent_basis → no warn
   const resultWithConsent = {
@@ -512,7 +518,7 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoConsentNoPT);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result without consent_basis → accepted", t);
 
-  // 5b. type:result with non-empty commits but no affected_files → accepted (affected_files now optional)
+  // 5b. type:result with non-empty commits but no affected_files → warn (v1.1 conditional)
   const resultCommitsNoAffected = {
     type: "result",
     task_id: "rp-2026-06-19-st-r05b",
@@ -526,7 +532,16 @@ async function testStatus(client) {
     },
   };
   t = await send(client, ch, resultCommitsNoAffected);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits but no affected_files → accepted", t);
+  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+
+  // 5c. type:result with commits AND affected_files → no warn
+  const resultCommitsWithAffected = {
+    ...resultCommitsNoAffected,
+    task_id: "rp-2026-06-19-st-r05c",
+    affected_files: ["src/migration.sql"],
+  };
+  t = await send(client, ch, resultCommitsWithAffected);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits and affected_files accepted", t);
 
   // 6. Valid handoff → no warn
   const validHandoff = {
@@ -552,9 +567,9 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoSummary);
   expect(/schema validation failed/.test(t), "status strict: type:result without summary → rejected", t);
 
-  // 9. Strict: type:result with production_touching=true but no consent_basis → accepted (consent_basis now optional)
+  // 9. Strict: type:result with production_touching=true but no consent_basis → rejected (v1.1 conditional)
   t = await send(client, ch, resultNoConsent);
-  expect(/Sent #/.test(t) && !/schema validation failed/.test(t), "status strict: type:result production_touching=true without consent_basis → accepted", t);
+  expect(/schema validation failed/.test(t), "status strict: type:result production_touching=true without consent_basis → rejected", t);
 
   // 10. Strict: type:status without summary passes (summary only required on result)
   t = await send(client, ch, validStatus);
@@ -661,6 +676,12 @@ async function testControl(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid approval-token accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokenrp_2026_07_07_ctrl_tok_nobody = { ...validToken, task_id: "rp-2026-07-07-ctrl-tok-nobody" };
+  delete bodylessTokenrp_2026_07_07_ctrl_tok_nobody.body;
+  t = await send(client, ch, bodylessTokenrp_2026_07_07_ctrl_tok_nobody);
+  expect(/WARN/.test(t), "control: bodyless approval-token → warn (body required)", t);
+
   // 9. Valid approval-revoke → no warn
   const validRevoke = {
     type: "approval-revoke",
@@ -711,11 +732,16 @@ async function testTelemetry(client) {
   expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: valid heartbeat accepted, no warn", t);
 
   // 2. All valid activity states
-  for (const state of ["idle-polling", "blocked-on-question", "rotating"]) {
+  for (const state of ["idle-polling", "idle-exit", "blocked-on-question", "rotating", "session-end", "reviewing", "coverage-patrol"]) {
     const hb = { ...validHB, activity: { state } };
     t = await send(client, ch, hb);
     expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
   }
+
+  // exit_code allowed top-level on session-end heartbeats (v1.1)
+  const withExitCode = { ...validHB, activity: { state: "session-end" }, exit_code: 0 };
+  t = await send(client, ch, withExitCode);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: session-end heartbeat with exit_code accepted", t);
 
   // 3. Invalid state → warn
   const badState = { ...validHB, activity: { state: "undefined-state" } };

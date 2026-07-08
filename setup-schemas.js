@@ -16,12 +16,12 @@ const SECRET     = process.env.SHARED_SECRET || "";
 const STRICT     = process.env.STRICT === "1";
 
 const REGISTRATIONS = [
-  { channel: "dv-backend",         file: "schemas/dv-worker-inbox.json",   strict: true },
-  { channel: "dv-frontend",        file: "schemas/dv-worker-inbox.json", strict: true },
+  { channel: "dv-backend",         file: "schemas/dv-worker-inbox.json",   strict: false },
+  { channel: "dv-frontend",        file: "schemas/dv-worker-inbox.json", strict: false },
   { channel: "dv-customer-portal", file: "schemas/dv-worker-inbox.json" },
-  { channel: "dv-qa",              file: "schemas/dv-worker-inbox.json", strict: true  },
+  { channel: "dv-qa",              file: "schemas/dv-worker-inbox.json", strict: false  },
   { channel: "dv-status",          file: "schemas/dv-status.json",         strict: true },
-  { channel: "dv-control",         file: "schemas/dv-control.json",        strict: true },
+  { channel: "dv-control",         file: "schemas/dv-control.json",        strict: false },
   { channel: "dv-telemetry",       file: "schemas/dv-telemetry.json",      strict: true },
   { channel: "dv-backlog",         file: "schemas/dv-backlog.json",        strict: true },
   { channel: "dv-sprint-retrospective", file: "schemas/dv-backlog.json",   strict: true },
@@ -47,7 +47,7 @@ async function main() {
     const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: strictMode, version: "1.0" },
+      arguments: { channel, schema, strict: strictMode, version: JSON.parse(schema).version || "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(22)} ← ${file}`);

@@ -186,6 +186,12 @@ async function testControl(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid approval-token with full body accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendx_2026_07_07_ctrl_tok_nobody = { ...validToken, task_id: "dx-2026-07-07-ctrl-tok-nobody" };
+  delete bodylessTokendx_2026_07_07_ctrl_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendx_2026_07_07_ctrl_tok_nobody);
+  expect(/WARN/.test(t), "control: bodyless approval-token → warn (body required)", t);
+
   // 3. Valid type:contract-change with wire_compat
   const validContract = {
     type: "contract-change",
@@ -262,17 +268,56 @@ async function testStatus(client) {
   let r = await registerSchema(client, ch, file, false);
   expect(/Registered schema/.test(r.content?.[0]?.text), "status: schema registered warn-only");
 
-  // 1. Valid type:result (dx-status schema has no summary field — additionalProperties:false)
+  // 1. Valid type:result with summary (required on results since v1.1)
   const validResult = {
     type: "result",
     task_id: "dx-2026-06-22-st-r01",
     from: "api",
     to: "orchestrator",
     subject: "invoice API complete",
+    summary: "PASS — invoice API endpoints implemented, 12/12 tests pass",
     body: { consent_basis: "orchestrator-dispatch-only" },
   };
   let t = await send(client, ch, validResult);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:result accepted, no warn", t);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: valid type:result with summary accepted, no warn", t);
+
+  // 1b. type:result missing summary → warn
+  const resultNoSummary = {
+    type: "result",
+    task_id: "dx-2026-06-22-st-r04",
+    from: "api",
+    to: "orchestrator",
+    subject: "result without summary",
+    body: {},
+  };
+  t = await send(client, ch, resultNoSummary);
+  expect(/WARN/.test(t), "status: result missing summary → warn", t);
+
+  // 1c. type:result with summary + affected_files → no warn
+  const resultWithFiles = {
+    type: "result",
+    task_id: "dx-2026-06-22-st-r05",
+    from: "web",
+    to: "orchestrator",
+    subject: "invoice UI complete",
+    summary: "PASS — invoice list page shipped",
+    affected_files: ["src/pages/invoices.tsx", "src/api/invoices.ts"],
+    body: { commits: [{ sha: "abc1234", branch: "worker/web" }] },
+  };
+  t = await send(client, ch, resultWithFiles);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: result with summary + affected_files accepted, no warn", t);
+
+  // 1d. type:status without summary → no warn (summary only required on results)
+  const statusNoSummary = {
+    type: "status",
+    task_id: "dx-2026-06-22-st-s01",
+    from: "api",
+    to: "orchestrator",
+    subject: "making progress on invoice API",
+    body: {},
+  };
+  t = await send(client, ch, statusNoSummary);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:status without summary accepted, no warn", t);
 
   // 2. Valid type:question
   const validQuestion = {
@@ -305,6 +350,7 @@ async function testStatus(client) {
     from: "db",
     to: "orchestrator",
     subject: "migration applied with consent",
+    summary: "PASS — migration applied with consent",
     body: { production_touching: true, consent_basis: "orchestrator-dispatch-only" },
   };
   t = await send(client, ch, resultWithBasis);
@@ -365,11 +411,16 @@ async function testTelemetry(client) {
   expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: valid heartbeat accepted, no warn", t);
 
   // 2. All valid activity states
-  for (const state of ["idle-polling", "blocked-on-question", "rotating"]) {
+  for (const state of ["idle-polling", "idle-exit", "blocked-on-question", "rotating", "session-end", "reviewing", "coverage-patrol"]) {
     const hb = { ...validHB, activity: { state } };
     t = await send(client, ch, hb);
     expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
   }
+
+  // exit_code allowed top-level on session-end heartbeats (v1.1)
+  const withExitCode = { ...validHB, activity: { state: "session-end" }, exit_code: 0 };
+  t = await send(client, ch, withExitCode);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: session-end heartbeat with exit_code accepted", t);
 
   // 3. Heartbeat missing context.rotation_recommended → warn
   const missingRotation = {
@@ -438,6 +489,32 @@ async function testWorkerInbox(client) {
   let t = await send(client, ch, validTask);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid task accepted, no warn", t);
 
+  // 1b. Full v2.1 envelope — dispatch fields accepted since v1.1
+  const v21Task = {
+    type: "task",
+    task_id: "dx-2026-06-22-api-002",
+    from: "orchestrator",
+    to: "api",
+    subject: "v2.1 envelope task",
+    context: "why this task exists",
+    background: "prior decisions and related tasks.",
+    scope: "medium",
+    files: { read: ["docs/api.md"], write: ["src/api/invoices.ts"] },
+    checks: [{ name: "test", run: "npm test", pass_condition: "all pass" }],
+    constraints: ["Do NOT touch files outside files.write"],
+    acceptance_criteria: ["endpoints implemented", "tests green"],
+    result_template: { required_checks: { test: "PASS|FAIL" }, commits: [] },
+    baseline_task_id: "dx-2026-06-22-baseline",
+    body: "implement per the checks",
+  };
+  t = await send(client, ch, v21Task);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: v2.1 envelope fields accepted, no warn", t);
+
+  // 1c. Unknown top-level field still rejected (additionalProperties:false intact)
+  const unknownField = { ...validTask, task_id: "dx-2026-06-22-api-003", made_up_field: true };
+  t = await send(client, ch, unknownField);
+  expect(/WARN/.test(t), "worker-inbox: unknown top-level field → warn (additionalProperties still enforced)", t);
+
   // 2. task_id failing pattern → warn
   const badTaskId = {
     type: "task",
@@ -488,6 +565,12 @@ async function testWorkerInbox(client) {
   };
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token accepted, no warn", t);
+
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendx_2026_07_07_wi_tok_nobody = { ...validToken, task_id: "dx-2026-07-07-wi-tok-nobody" };
+  delete bodylessTokendx_2026_07_07_wi_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendx_2026_07_07_wi_tok_nobody);
+  expect(/WARN/.test(t), "worker-inbox: bodyless approval-token → warn (body required)", t);
 
   // 6. type:contract-change without wire_compat → warn
   const contractNoCompat = {

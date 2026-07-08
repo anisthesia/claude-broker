@@ -276,7 +276,9 @@ async function run() {
 
   console.log("\n8. Dashboard ?ns=unknown");
   {
-    const res = await fetch(`${BROKER_HTTP}/dashboard?ns=definitely-nonexistent-ns-xyz`);
+    const res = await fetch(`${BROKER_HTTP}/dashboard?ns=definitely-nonexistent-ns-xyz`, {
+      headers: SECRET ? { Authorization: `Bearer ${SECRET}` } : {},
+    });
     assert(res.status === 200, `dashboard?ns=unknown returns 200 (not a crash), got ${res.status}`);
     const html = await res.text();
     assert(html.includes("<html") || html.includes("<!DOCTYPE"), "dashboard: returns HTML body");

@@ -468,7 +468,7 @@ async function testStatus(client) {
   t = await send(client, ch, resultNoConsent);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result without consent_basis → accepted (optional)", t);
 
-  // 5. type:result with commits but no affected_files → accepted (affected_files is optional)
+  // 5. type:result with commits but no affected_files → warn (v1.1 conditional)
   const resultNoAffected = {
     type: "result",
     task_id: "cb-2026-06-19-st-r04",
@@ -482,7 +482,29 @@ async function testStatus(client) {
     },
   };
   t = await send(client, ch, resultNoAffected);
-  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result with commits but no affected_files → accepted (optional)", t);
+  expect(/WARN/.test(t), "status: type:result with commits but no affected_files → warn", t);
+
+  // 5a. type:result production_touching=true without consent_basis → warn (v1.1 conditional)
+  const resultProdNoConsent = {
+    type: "result",
+    task_id: "cb-2026-06-19-st-r04a",
+    from: "core",
+    to: "orchestrator",
+    subject: "restarted broker",
+    summary: "PASS — broker restarted",
+    body: { production_touching: true },
+  };
+  t = await send(client, ch, resultProdNoConsent);
+  expect(/WARN/.test(t), "status: type:result production_touching=true without consent_basis → warn", t);
+
+  // 5b. type:result production_touching=true with consent_basis → no warn
+  const resultProdWithConsent = {
+    ...resultProdNoConsent,
+    task_id: "cb-2026-06-19-st-r04b",
+    body: { production_touching: true, consent_basis: "approval-token:#41925" },
+  };
+  t = await send(client, ch, resultProdWithConsent);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "status: type:result production_touching=true with consent_basis accepted", t);
 
   // 6. type:result with commits AND affected_files → no warn
   const resultWithAffected = {
@@ -552,11 +574,16 @@ async function testTelemetry(client) {
   expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: valid heartbeat accepted, no warn", t);
 
   // 2. All activity states accepted
-  for (const state of ["idle-exit", "blocked-on-question", "rotating", "session-end"]) {
+  for (const state of ["idle-polling", "idle-exit", "blocked-on-question", "rotating", "session-end", "reviewing", "coverage-patrol"]) {
     const hb = { ...validHB, activity: { state } };
     t = await send(client, ch, hb);
     expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
   }
+
+  // exit_code allowed top-level on session-end heartbeats (v1.1)
+  const withExitCode = { ...validHB, activity: { state: "session-end" }, exit_code: 0 };
+  t = await send(client, ch, withExitCode);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: session-end heartbeat with exit_code accepted", t);
 
   // 3. Invalid state → warn
   const badState = { ...validHB, activity: { state: "undefined-state" } };

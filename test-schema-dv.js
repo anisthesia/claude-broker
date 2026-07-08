@@ -207,6 +207,12 @@ async function testWorkerInbox(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "worker-inbox: valid approval-token accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendv_2026_07_07_wi_tok_nobody = { ...validToken, task_id: "dv-2026-07-07-wi-tok-nobody" };
+  delete bodylessTokendv_2026_07_07_wi_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendv_2026_07_07_wi_tok_nobody);
+  expect(/WARN/.test(t), "worker-inbox: bodyless approval-token → warn (body required)", t);
+
   // 14. task with ui_verified_instructions → no warn
   const taskWithUiInstructions = {
     type: "task",
@@ -576,6 +582,12 @@ async function testControl(client) {
   t = await send(client, ch, validToken);
   expect(/Sent #/.test(t) && !/WARN/.test(t), "control: valid approval-token accepted", t);
 
+  // approval-token with NO body at all → warn (v1.1: body now required)
+  const bodylessTokendv_2026_07_07_ctrl_tok_nobody = { ...validToken, task_id: "dv-2026-07-07-ctrl-tok-nobody" };
+  delete bodylessTokendv_2026_07_07_ctrl_tok_nobody.body;
+  t = await send(client, ch, bodylessTokendv_2026_07_07_ctrl_tok_nobody);
+  expect(/WARN/.test(t), "control: bodyless approval-token → warn (body required)", t);
+
   // 4. Valid approval-revoke → no warn
   const validRevoke = {
     type: "approval-revoke",
@@ -710,6 +722,11 @@ async function testTelemetry(client) {
     t = await send(client, ch, hb);
     expect(/Sent #/.test(t) && !/WARN/.test(t), `telemetry: state="${state}" accepted`, t);
   }
+
+  // exit_code allowed top-level on session-end heartbeats (v1.1)
+  const withExitCode = { ...validHB, activity: { state: "session-end" }, exit_code: 0 };
+  t = await send(client, ch, withExitCode);
+  expect(/Sent #/.test(t) && !/WARN/.test(t), "telemetry: session-end heartbeat with exit_code accepted", t);
 
   // 3. Heartbeat with cost_since_start → no warn
   const hbWithCost = {

@@ -18,7 +18,7 @@ const STRICT     = process.env.STRICT === "1";
 const REGISTRATIONS = [
   { channel: "sm-orchestrator", file: "schemas/sm-orchestrator-inbox.json", strict: STRICT },
   { channel: "sm-control",      file: "schemas/sm-control.json",            strict: STRICT },
-  { channel: "sm-status",       file: "schemas/sm-status.json",             strict: STRICT },
+  { channel: "sm-status",       file: "schemas/sm-status.json",             strict: false },
   { channel: "sm-telemetry",    file: "schemas/sm-telemetry.json",          strict: STRICT },
   { channel: "sm-backlog",      file: "schemas/sm-backlog.json",            strict: STRICT },
   // Worker inboxes
@@ -44,7 +44,7 @@ async function main() {
     const strictMode = strict !== undefined ? strict : STRICT;
     const res = await client.callTool({
       name: "register_channel_schema",
-      arguments: { channel, schema, strict: strictMode, version: "1.0" },
+      arguments: { channel, schema, strict: strictMode, version: JSON.parse(schema).version || "1.0" },
     });
     const text = res.content?.[0]?.text ?? "(no response)";
     console.log(`  ${channel.padEnd(28)} ← ${file}`);
