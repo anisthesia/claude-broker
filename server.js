@@ -109,10 +109,14 @@ const stmtChansByPrefix = db.prepare("SELECT DISTINCT channel FROM messages WHER
 const stmtPurge        = db.prepare("DELETE FROM messages WHERE channel = ?");
 const stmtPruneOlder   = db.prepare("DELETE FROM messages WHERE channel = ? AND created_at < ?");
 const stmtPruneAllOld  = db.prepare("DELETE FROM messages WHERE channel NOT IN (SELECT value FROM json_each(?)) AND created_at < ?");
+// summary must come from the newest result row (highest id), not a lexicographic MAX
+// over summary strings — a stale 'PASS — ...' would shadow a later 'FAIL — ...'.
+// SQLite guarantees bare columns resolve from the MAX(id) row when the query has a
+// single min()/max() aggregate.
 const stmtCheckResult  = db.prepare(`
   SELECT COUNT(*) AS n,
-         MAX(CASE WHEN json_valid(content) AND json_extract(content, '$.type') = 'result'
-                  THEN json_extract(content, '$.summary') END) AS summary
+         MAX(id) AS latest_id,
+         json_extract(content, '$.summary') AS summary
   FROM messages WHERE channel = ? AND json_valid(content)
     AND json_extract(content, '$.task_id') = ? AND json_extract(content, '$.type') = 'result'
 `);
@@ -487,11 +491,15 @@ function buildServer() {
       filter_sender: z.string().optional().describe("Only wake/return for messages from this sender."),
       filter_type:   z.string().optional().describe("Only wake/return for messages where JSON content.type === this value."),
     },
-  }, async ({ channel, since_id, timeout_ms, limit, filter_sender, filter_type }) => {
+  }, async ({ channel, since_id, timeout_ms, limit, filter_sender, filter_type }, extra) => {
     const sinceId = since_id ?? 0;
     const lim     = limit ?? 100;
     const timeout = Math.min(timeout_ms ?? 60000, 300000);
     const event   = `msg:${channel}`;
+    // Aborted by the SDK when the client disconnects (transport.close() on res 'close'
+    // in the /mcp handler) — without it, the listener + timer below would linger for
+    // the full timeout (up to 300s) after the caller is gone.
+    const signal  = extra?.signal;
 
     return new Promise((resolve) => {
       let timer = null;
@@ -500,6 +508,7 @@ function buildServer() {
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onMessage);
+        signal?.removeEventListener("abort", onAbort);
       }
 
       function settle(result) {
@@ -514,6 +523,14 @@ function buildServer() {
         if (rows.length > 0) settle(formatRows(rows, channel, sinceId));
         // Non-matching message — keep listener registered, timer keeps running
       }
+
+      function onAbort() {
+        // Client gone — response is never delivered; settle only to free listener + timer.
+        settle({ content: [{ type: "text", text: `Wait on '${channel}' aborted — client disconnected.` }] });
+      }
+
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort);
 
       // Register listener BEFORE initial DB check to close the race window:
       // a send_message that arrives between check and registration would be missed.
@@ -555,10 +572,12 @@ function buildServer() {
       watch_channel: z.string().optional().describe("Channel to watch for result messages. Default: dv-status."),
       timeout_ms:    z.number().int().positive().max(300000).optional().describe("Max wait in ms. Default 60000. Max 300000."),
     },
-  }, async ({ channel, sender, content, depends_on, watch_channel, timeout_ms }) => {
+  }, async ({ channel, sender, content, depends_on, watch_channel, timeout_ms }, extra) => {
     const watchChan = watch_channel ?? "dv-status";
     const timeout   = Math.min(timeout_ms ?? 60000, 300000);
     const event     = `msg:${watchChan}`;
+    // Same disconnect-cleanup contract as wait_for_messages.
+    const signal    = extra?.signal;
 
     function allSatisfied() {
       return depends_on.every(taskId => stmtCheckResult.get(watchChan, taskId).n > 0);
@@ -586,6 +605,7 @@ function buildServer() {
       function cleanup() {
         if (timer) { clearTimeout(timer); timer = null; }
         messageBus.off(event, onResult);
+        signal?.removeEventListener("abort", onAbort);
       }
 
       function settle(result) {
@@ -593,6 +613,11 @@ function buildServer() {
         settled = true;
         cleanup();
         resolve(result);
+      }
+
+      function onAbort() {
+        // Client gone — do NOT post the gated message on a dead request; just free resources.
+        settle({ content: [{ type: "text", text: `Gated post to '${channel}' aborted — client disconnected.` }], isError: true });
       }
 
       function tryPost() {
@@ -611,6 +636,9 @@ function buildServer() {
         if (!allSatisfied()) return;
         tryPost();
       }
+
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort);
 
       // Register listener BEFORE re-check so no result event is missed between
       // the initial allSatisfied() check above and this listener registration.
@@ -1060,12 +1088,21 @@ function buildServer() {
       content: z.string().min(1).describe("Heartbeat payload — plain text or JSON-as-string."),
     },
   }, async ({ channel, sender, content }) => {
+    // Enforce channel schemas exactly like send_message: strict → reject, warn-only → warn + accept.
+    const check = validateContent(channel, content);
+    if (!check.ok && check.strict) {
+      return { content: [{ type: "text", text: `schema validation failed on '${channel}': ${check.errors}. Call get_channel_schema('${channel}') to see required fields.` }], isError: true };
+    }
+    if (!check.ok && !check.strict) {
+      console.warn(`[claude-broker] WARN schema mismatch on '${channel}' (upsert_heartbeat): ${check.errors}`);
+    }
     const now = Date.now();
     const r   = stmtInsert.run(channel, sender, content, now);
     const id  = r.lastInsertRowid;
     stmtDeleteOtherHeartbeats.run(channel, sender, id);
     messageBus.emit(`msg:${channel}`, { id, sender, content });
-    return { content: [{ type: "text", text: `Heartbeat #${id} posted for '${sender}' on '${channel}' at ${new Date(now).toISOString()}.` }] };
+    const warn = (!check.ok && !check.strict) ? `  [WARN schema mismatch: ${check.errors}]` : "";
+    return { content: [{ type: "text", text: `Heartbeat #${id} posted for '${sender}' on '${channel}' at ${new Date(now).toISOString()}.${warn}` }] };
   });
 
   // ── sprint_summary ───────────────────────────────────────────────────────────
@@ -1299,6 +1336,16 @@ function auth(req, res, next) {
   }
   next();
 }
+
+// Dashboard auth — browsers can't set an Authorization header on page loads,
+// so the dashboard routes also accept ?token=<secret>. Rendered links must
+// propagate the token (see tokenParam in the dashboard handlers).
+function dashboardAuth(req, res, next) {
+  if (!SHARED_SECRET) return next();
+  const header = req.headers.authorization || "";
+  if (header === `Bearer ${SHARED_SECRET}` || req.query.token === SHARED_SECRET) return next();
+  return res.status(401).json({ error: "Unauthorized" });
+}
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now(), uptime_s: Math.floor((Date.now() - startedAt) / 1000) }));
@@ -1342,9 +1389,19 @@ app.post("/messages", auth, (req, res) => {
   if (!isValidChannelName(channel))
     return res.status(400).json({ error: `invalid channel name: control characters are not allowed` });
   const contentStr = typeof content === "string" ? content : JSON.stringify(content);
+  // Enforce channel schemas exactly like MCP send_message: strict → reject, warn-only → log + accept.
+  const check = validateContent(channel, contentStr);
+  if (!check.ok && check.strict) {
+    return res.status(400).json({ error: `schema validation failed on '${channel}': ${check.errors}` });
+  }
+  if (!check.ok && !check.strict) {
+    console.warn(`[claude-broker] WARN schema mismatch on '${channel}' (POST /messages): ${check.errors}`);
+  }
   const row = stmtInsert.run(channel, sender, contentStr, Date.now());
   messageBus.emit(`msg:${channel}`, { id: row.lastInsertRowid, channel, sender, content: contentStr });
-  res.json({ id: row.lastInsertRowid, channel, sender });
+  const out = { id: row.lastInsertRowid, channel, sender };
+  if (!check.ok && !check.strict) out.warn = `schema mismatch: ${check.errors}`;
+  res.json(out);
 });
 
 // ── Worker control endpoints ───────────────────────────────────────────────────
@@ -1467,7 +1524,7 @@ function escHtml(s) {
 }
 
 // Dashboard
-app.get("/dashboard", (req, res) => {
+app.get("/dashboard", dashboardAuth, (req, res) => {
   const now         = Date.now();
   const allChannels = stmtChans.all();
   const allCaps     = stmtCapList.all();
@@ -1485,6 +1542,7 @@ app.get("/dashboard", (req, res) => {
   const selectedNs = req.query.ns || "all";
   const isAll      = selectedNs === "all";
   const live       = req.query.live === "1";
+  const tokenParam = req.query.token ? `token=${encodeURIComponent(req.query.token)}` : "";
 
   function matchesNs(ch) { return isAll || nsOf(ch) === selectedNs; }
 
@@ -1658,6 +1716,7 @@ app.get("/dashboard", (req, res) => {
     if (selectedNs !== "all") p.push(`ns=${selectedNs}`);
     if (live) p.push("live=1");
     if (showAll) p.push("feed=all");
+    if (tokenParam) p.push(tokenParam);
     return `/dashboard${p.length ? "?" + p.join("&") : ""}`;
   };
 
@@ -1729,6 +1788,7 @@ app.get("/dashboard", (req, res) => {
     const params = [];
     if (ns !== "all") params.push(`ns=${ns}`);
     if (lv) params.push("live=1");
+    if (tokenParam) params.push(tokenParam);
     return `/dashboard${params.length ? "?" + params.join("&") : ""}`;
   };
 
@@ -1754,7 +1814,7 @@ app.get("/dashboard", (req, res) => {
       try { const p = JSON.parse(text); text = p.subject || p.type || text; } catch {}
       preview = `<span class="preview">${escHtml(String(text).slice(0,80))}${text.length > 80 ? "…" : ""}</span>`;
     }
-    const chanHref = `/dashboard/channel?name=${encodeURIComponent(r.channel)}${selectedNs !== "all" ? `&ns=${selectedNs}` : ""}`;
+    const chanHref = `/dashboard/channel?name=${encodeURIComponent(r.channel)}${selectedNs !== "all" ? `&ns=${selectedNs}` : ""}${tokenParam ? `&${tokenParam}` : ""}`;
     return `<tr>
       <td><a href="${chanHref}" class="chan-link">${escHtml(r.channel)}</a>${exempt}${schema}</td>
       <td>${r.n}</td>
@@ -2033,7 +2093,8 @@ function workerAction(name, action) {
   const btn = event.target;
   btn.disabled = true;
   btn.textContent = action === 'start' ? 'Starting…' : 'Stopping…';
-  fetch('/workers/' + encodeURIComponent(name) + '/' + action, { method: 'POST' })
+  const token = new URLSearchParams(location.search).get('token');
+  fetch('/workers/' + encodeURIComponent(name) + '/' + action, { method: 'POST', headers: token ? { 'Authorization': 'Bearer ' + token } : {} })
     .then(r => r.json())
     .then(d => { if (d.ok) location.reload(); else { alert(d.error || 'Error'); btn.disabled = false; btn.textContent = action === 'start' ? 'Start' : 'Stop'; } })
     .catch(() => { alert('Request failed'); btn.disabled = false; });
@@ -2043,7 +2104,7 @@ function workerAction(name, action) {
 });
 
 // Channel message viewer
-app.get("/dashboard/channel", (req, res) => {
+app.get("/dashboard/channel", dashboardAuth, (req, res) => {
   const channel = req.query.name;
   const backNs  = req.query.ns || "all";
   const limit   = Math.min(parseInt(req.query.limit || "50", 10), 200);
@@ -2051,7 +2112,10 @@ app.get("/dashboard/channel", (req, res) => {
 
   if (!channel) return res.status(400).send("channel required");
 
-  const backHref = backNs === "all" ? "/dashboard" : `/dashboard?ns=${backNs}`;
+  const tokenParam = req.query.token ? `token=${encodeURIComponent(req.query.token)}` : "";
+  const backHref = backNs === "all"
+    ? `/dashboard${tokenParam ? "?" + tokenParam : ""}`
+    : `/dashboard?ns=${backNs}${tokenParam ? "&" + tokenParam : ""}`;
 
   const rows = db.prepare(
     `SELECT id, sender, content, created_at FROM messages WHERE channel = ? AND id > ? ORDER BY id DESC LIMIT ?`
@@ -2097,7 +2161,7 @@ app.get("/dashboard/channel", (req, res) => {
     : '<span style="color:#484f58">no schema</span>';
 
   const olderHref = rows.length === limit
-    ? `/dashboard/channel?name=${encodeURIComponent(channel)}&ns=${backNs}&limit=${limit}&since_id=${rows[rows.length-1].id - 1}`
+    ? `/dashboard/channel?name=${encodeURIComponent(channel)}&ns=${backNs}&limit=${limit}&since_id=${rows[rows.length-1].id - 1}${tokenParam ? `&${tokenParam}` : ""}`
     : null;
 
   res.send(`<!DOCTYPE html>
